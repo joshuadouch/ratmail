@@ -67,10 +67,14 @@ function uidList(v) {
 // ---------------------------------------------------------------------------
 // Helpers around a logged-in session
 
-async function openImap(env, sess) {
+function clientIp(request) {
+  return request.headers.get('cf-connecting-ip') || null;
+}
+
+async function openImap(env, sess, ip) {
   const server = findServer(env, sess.server);
   if (!server) throw new HttpError(401, 'This mail server is no longer configured');
-  return ImapClient.open(server.imap, sess.username, sess.password);
+  return ImapClient.open(server.imap, sess.username, sess.password, ip);
 }
 
 async function folderBySpecialUse(imap, use) {
@@ -201,7 +205,7 @@ const routes = {
     if (!username || !password) return fail(400, 'Enter your username and password');
     let imap;
     try {
-      imap = await ImapClient.open(server.imap, username, password);
+      imap = await ImapClient.open(server.imap, username, password, clientIp(request));
     } catch (err) {
       if (err instanceof AuthError) return fail(401, 'The username or password is incorrect');
       return fail(502, `Could not reach the mail server: ${err.message}`);
@@ -477,7 +481,7 @@ const routes = {
     const { raw, messageId } = buildMessage({ ...fields, html: meta.isPlain ? null : html, text: meta.isPlain ? meta.text || '' : undefined, attachments });
     const server = findServer(env, sess.server);
     try {
-      await sendMail(server.smtp, { username: sess.username, password: sess.password }, { from: fields.from.email, recipients: [...new Set(recipients)] }, raw, new URL(request.url).hostname);
+      await sendMail(server.smtp, { username: sess.username, password: sess.password }, { from: fields.from.email, recipients: [...new Set(recipients)] }, raw, new URL(request.url).hostname, clientIp(request));
     } catch (err) {
       if (err instanceof SmtpError) return fail(502, `The mail server did not accept the message. ${err.message}`);
       throw err;
@@ -528,7 +532,7 @@ async function handleApi(request, env, ctx) {
 
   let client = null;
   const imap = async () => {
-    if (!client) client = await openImap(env, sess);
+    if (!client) client = await openImap(env, sess, clientIp(request));
     return client;
   };
   try {

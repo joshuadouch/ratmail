@@ -43,7 +43,7 @@ class Conn {
  * @param envelope { from, recipients: [] }
  * @param data    message as a binary string with CRLF line endings
  */
-export async function sendMail(server, auth, envelope, data, heloName = 'ratmail') {
+export async function sendMail(server, auth, envelope, data, heloName = 'ratmail', clientIp = null) {
   const socket = openSocket(server);
   let c = new Conn(socket);
   try {
@@ -57,7 +57,18 @@ export async function sendMail(server, auth, envelope, data, heloName = 'ratmail
       c = new Conn(socket.startTls());
       r = await c.cmd(`EHLO ${heloName}`, [250]);
     }
-    const caps = r.lines.map((l) => l.toUpperCase());
+    let caps = r.lines.map((l) => l.toUpperCase());
+    // Postfix only offers XCLIENT to hosts in smtpd_authorized_xclient_hosts.
+    // It makes the server log and rate-limit the browser's address.
+    const xclient = caps.find((l) => /^XCLIENT\b/.test(l));
+    if (clientIp && xclient && /\bADDR\b/.test(xclient)) {
+      const addr = clientIp.includes(':') ? 'IPV6:' + clientIp : clientIp;
+      const x = await c.cmd(`XCLIENT ADDR=${addr}`, [220]);
+      if (x.code === 220) {
+        r = await c.cmd(`EHLO ${heloName}`, [250]);
+        caps = r.lines.map((l) => l.toUpperCase());
+      }
+    }
     const authLine = caps.find((l) => l.startsWith('AUTH ') || l.startsWith('AUTH=')) || '';
     const user = utf8Encode(auth.username);
     const pass = utf8Encode(auth.password);

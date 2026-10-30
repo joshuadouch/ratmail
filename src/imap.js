@@ -32,8 +32,14 @@ export class ImapClient {
     this.queue = Promise.resolve();
   }
 
-  /** Connects, upgrades with STARTTLS if configured, and logs in. */
-  static async open(server, username, password) {
+  /**
+   * Connects, upgrades with STARTTLS if configured, and logs in.
+   * clientIp is the browser's address. It is sent with the IMAP ID command
+   * (x-originating-ip) so a server that trusts us (Dovecot
+   * login_trusted_networks) logs and rate-limits the real user, not the
+   * Cloudflare address. Servers that don't trust us ignore it.
+   */
+  static async open(server, username, password, clientIp = null) {
     const socket = openSocket(server);
     let client = new ImapClient(socket);
     try {
@@ -46,7 +52,10 @@ export class ImapClient {
         client.writer.release();
         const secure = socket.startTls();
         client = new ImapClient(secure);
+        const caps = await client.command('CAPABILITY');
+        for (const l of caps.untagged) client.parseCapabilityText(l);
       }
+      if (clientIp) await client.sendId(clientIp);
       await client.login(username, password);
       return client;
     } catch (err) {
@@ -129,6 +138,13 @@ export class ImapClient {
       }
       // continuation requests outside of literals are not expected; ignore
     }
+  }
+
+  async sendId(clientIp) {
+    if (!this.has('ID')) return;
+    try {
+      await this.command(`ID ("name" "ratmail" "x-originating-ip" ${quote(clientIp)})`, { allowNo: true });
+    } catch {}
   }
 
   async login(username, password) {
