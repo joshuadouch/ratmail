@@ -84,7 +84,10 @@ Then add a custom domain (for example `ratmail.ratlan.net`) to the Worker in the
 
 ### Mailcow notes
 
-- Mailcow's netfilter bans IPs after repeated failed logins. All ratmail traffic comes from Cloudflare's IP ranges, so several wrong passwords could get a Cloudflare address banned and break webmail for a while. Consider raising the netfilter limits, or putting Cloudflare Access in front of ratmail.
+- Mailcow's netfilter bans IPs after repeated failed logins, and all ratmail traffic comes from Cloudflare's IP ranges. ratmail forwards the browser's real IP (IMAP `ID` with `x-originating-ip`, SMTP `XCLIENT ADDR=`), so trust Cloudflare's ranges on the mail server and it will log and ban the real user instead:
+  - Dovecot (`data/conf/dovecot/extra.conf` on Mailcow): `login_trusted_networks = <ranges from https://www.cloudflare.com/ips/>`
+  - Postfix (`data/conf/postfix/extra.cf`): `smtpd_authorized_xclient_hosts = <same ranges, IPv6 in [brackets]>`
+  - Servers that don't trust the ranges ignore the forwarded IP.
 - Use your normal mailbox password, or a Mailcow app password with IMAP and SMTP allowed.
 
 ## Local development
