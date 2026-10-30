@@ -6,7 +6,10 @@
       "icon": "mail"
     },
     "title": "ratmail",
-    "footer": "\u00a9 2026 Josh Douch"
+    "footer": "© 2026 Josh Douch"
+  },
+  "turnstile": {
+    "siteKey": "0x4AAAAAAFhfD9O7W1z54LKk"
   },
   "servers": [
     {

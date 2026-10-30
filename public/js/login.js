@@ -28,6 +28,7 @@ export function renderLogin(root, config, { message, onSignedIn }) {
             <label class="field"><span>Username</span><input class="input" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required></label>
             <label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label>
             <label class="checkbox"><input type="checkbox" name="remember" checked> Stay signed in</label>
+            ${config.turnstile ? '<div class="turnstile"></div>' : ''}
             <button class="btn btn-primary" type="submit">Sign in</button>
           </form>
         </div>
@@ -44,10 +45,33 @@ export function renderLogin(root, config, { message, onSignedIn }) {
   } catch {}
   (user.value ? form.password : user).focus();
 
+  // Cloudflare Turnstile, when the server has it switched on.
+  let tsWidget = null;
+  let tsToken = '';
+  if (config.turnstile) {
+    loadTurnstile().then((turnstile) => {
+      tsWidget = turnstile.render($('.turnstile', root), {
+        sitekey: config.turnstile,
+        theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
+        callback: (t) => { tsToken = t; },
+        'expired-callback': () => { tsToken = ''; },
+        'error-callback': () => { tsToken = ''; },
+      });
+    }).catch(() => {
+      err.textContent = 'The security check could not load. Check your connection and reload the page.';
+      err.classList.remove('hidden');
+    });
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!user.value.trim() || !form.password.value) {
       err.textContent = 'Please enter your username and password.';
+      err.classList.remove('hidden');
+      return;
+    }
+    if (config.turnstile && !tsToken) {
+      err.textContent = 'Please complete the security check.';
       err.classList.remove('hidden');
       return;
     }
@@ -57,7 +81,7 @@ export function renderLogin(root, config, { message, onSignedIn }) {
     try {
       await api('login', {
         method: 'POST',
-        body: { server: form.server.value, username: user.value.trim(), password: form.password.value, remember: form.remember.checked },
+        body: { server: form.server.value, username: user.value.trim(), password: form.password.value, remember: form.remember.checked, turnstile: tsToken || undefined },
       });
       try {
         localStorage.setItem('ratmail.server', form.server.value);
@@ -70,6 +94,27 @@ export function renderLogin(root, config, { message, onSignedIn }) {
       btn.disabled = false;
       btn.textContent = 'Sign in';
       form.password.select();
+      // A Turnstile token works once, so get a fresh one for the next try.
+      if (tsWidget !== null && window.turnstile) {
+        tsToken = '';
+        window.turnstile.reset(tsWidget);
+      }
     }
   });
+}
+
+let turnstilePromise = null;
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (!turnstilePromise) {
+    turnstilePromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      s.async = true;
+      s.onload = () => (window.turnstile ? resolve(window.turnstile) : reject(new Error('turnstile')));
+      s.onerror = () => { turnstilePromise = null; reject(new Error('turnstile')); };
+      document.head.appendChild(s);
+    });
+  }
+  return turnstilePromise;
 }

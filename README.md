@@ -71,6 +71,14 @@ Edit `config/servers.json`:
 
 Workers cannot connect out on port 25, which is fine because sending uses the submission ports.
 
+## Login captcha (optional)
+
+Cloudflare Turnstile protects the sign-in form when both are set:
+- `turnstile.siteKey` in `config/servers.json` (or the `TURNSTILE_SITE_KEY` variable)
+- the `TURNSTILE_SECRET` Worker secret (`npx wrangler secret put TURNSTILE_SECRET`)
+
+Leave either out and the login works without a captcha. This is the only secret ratmail uses, and it protects the login form only, not mail.
+
 ## Deploy
 
 ```sh

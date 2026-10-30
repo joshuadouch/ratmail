@@ -67,6 +67,29 @@ function uidList(v) {
 // ---------------------------------------------------------------------------
 // Helpers around a logged-in session
 
+// Cloudflare Turnstile on the login form. Optional: it is on only when the
+// config has turnstile.siteKey (or TURNSTILE_SITE_KEY) and the Worker has the
+// TURNSTILE_SECRET secret.
+function turnstileSiteKey(env, cfg) {
+  const key = env.TURNSTILE_SITE_KEY || cfg.turnstile?.siteKey || null;
+  return key && env.TURNSTILE_SECRET ? key : null;
+}
+
+async function turnstileOk(env, token, ip) {
+  if (!token || typeof token !== 'string') return false;
+  const form = new FormData();
+  form.append('secret', env.TURNSTILE_SECRET);
+  form.append('response', token);
+  if (ip) form.append('remoteip', ip);
+  try {
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
+    const data = await r.json();
+    return data.success === true;
+  } catch {
+    return false;
+  }
+}
+
 function clientIp(request) {
   return request.headers.get('cf-connecting-ip') || null;
 }
@@ -193,11 +216,18 @@ function composeFields(meta, identityFallback) {
 const routes = {
   'GET /api/config': async ({ env }) => {
     const cfg = getConfig(env);
-    return json({ brand: cfg.brand || {}, servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, domain: s.domain || null })) });
+    return json({
+      brand: cfg.brand || {},
+      servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, domain: s.domain || null })),
+      turnstile: turnstileSiteKey(env, cfg),
+    });
   },
 
   'POST /api/login': async ({ env, request, url }) => {
     const body = await request.json().catch(() => ({}));
+    if (turnstileSiteKey(env, getConfig(env)) && !(await turnstileOk(env, body.turnstile, clientIp(request)))) {
+      return fail(400, 'Please complete the security check and try again', { turnstile: true });
+    }
     const server = findServer(env, body.server);
     if (!server) return fail(400, 'Choose a mail server');
     const username = String(body.username || '').trim();
