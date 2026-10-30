@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `npm run dev`. Points the app at a local test server.
+SERVERS_JSON='{"servers":[{"id":"local","name":"Local test (Dovecot)","imap":{"host":"127.0.0.1","port":9143,"tls":"off"},"smtp":{"host":"127.0.0.1","port":2525,"tls":"off"}}]}'

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>Mail</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try {
+      var p = JSON.parse(localStorage.getItem('ratmail.prefs') || '{}');
+      if (p.theme) document.documentElement.dataset.theme = p.theme;
+      if (p.accent) document.documentElement.style.setProperty('--accent', p.accent);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="app"><div class="boot"><div class="spinner"></div></div></div>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
