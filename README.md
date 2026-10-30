@@ -50,7 +50,7 @@ Edit `config/servers.json`:
 
 ```json
 {
-  "brand": { "logo": "ratlan.net", "title": "RatLAN Mail", "footer": "© 2026 Josh Douch" },
+  "brand": { "logo": { "bold": "rat", "light": "mail", "icon": "mail" }, "title": "ratmail", "footer": "© 2026 Josh Douch" },
   "servers": [
     {
       "id": "ratlan",
@@ -65,6 +65,7 @@ Edit `config/servers.json`:
 - `tls`: `"on"` (implicit TLS, ports 993/465), `"starttls"` (ports 143/587) or `"off"` (local testing only).
 - The first server is the default. With one server the dropdown is hidden.
 - Optional `"domain"` on a server: appended to usernames that have no `@` to make the sender address.
+- `brand.logo` can also be a plain string like `"ratlan.net"` (terminal icon, split at the dot).
 - Optional brand keys: `logoUrl` (an image instead of the text logo), `privacyUrl`, `imprintUrl`.
 - You can also override the whole file with a `SERVERS_JSON` variable (it is not a secret).
 

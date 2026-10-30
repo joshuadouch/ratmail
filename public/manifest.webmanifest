@@ -1,9 +1,15 @@
 {
-  "name": "Mail",
-  "short_name": "Mail",
+  "name": "ratmail",
+  "short_name": "ratmail",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#2c4a86",
-  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+  "theme_color": "#e86f1e",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
 }

@@ -1,15 +1,27 @@
 {
   "brand": {
-    "logo": "ratlan.net",
-    "title": "RatLAN Mail",
-    "footer": "© 2026 Josh Douch"
+    "logo": {
+      "bold": "rat",
+      "light": "mail",
+      "icon": "mail"
+    },
+    "title": "ratmail",
+    "footer": "\u00a9 2026 Josh Douch"
   },
   "servers": [
     {
       "id": "ratlan",
       "name": "RatLAN (Mailcow)",
-      "imap": { "host": "mail.ratlan.net", "port": 993, "tls": "on" },
-      "smtp": { "host": "mail.ratlan.net", "port": 465, "tls": "on" }
+      "imap": {
+        "host": "mail.ratlan.net",
+        "port": 993,
+        "tls": "on"
+      },
+      "smtp": {
+        "host": "mail.ratlan.net",
+        "port": 465,
+        "tls": "on"
+      }
     }
   ]
 }
