@@ -6,13 +6,13 @@ import { state, setPrefs, ACCENTS, BACKGROUNDS } from './state.js';
 
 const QUICK_THEMES = [
   ['white', '#ffffff'],
-  ['bg-blue', '#3f77c0'],
-  ['bg-slate', '#6b6e80'],
+  ['ratlan', BACKGROUNDS.RatLAN[0][2]],
+  ['ratlan-dark', BACKGROUNDS.RatLAN[1][2]],
   ['dark', '#111214'],
   ['bg-blue-sunset', BACKGROUNDS.Sunsets[0][2]],
   ['bg-pink-sunset', BACKGROUNDS.Sunsets[1][2]],
   ['bg-orange-glow', BACKGROUNDS.Sunsets[2][2]],
-  ['smoke', '#ececec'],
+  ['bg-blue', '#3f77c0'],
 ];
 
 function layoutPic(kind) {

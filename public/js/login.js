@@ -61,7 +61,7 @@ export function renderLogin(root, config, { message, onSignedIn }) {
     loadTurnstile().then((turnstile) => {
       tsWidget = turnstile.render($('.turnstile', root), {
         sitekey: config.turnstile,
-        theme: ['dark', 'light'].includes(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : 'auto',
+        theme: { dark: 'dark', 'ratlan-dark': 'dark', light: 'light', ratlan: 'light' }[document.documentElement.dataset.theme] || 'auto',
         callback: (t) => { tsToken = t; },
         'expired-callback': () => { tsToken = ''; },
         'error-callback': () => { tsToken = ''; },

@@ -108,6 +108,10 @@ export function myAddresses() {
 export const ACCENTS = ['#e0575b', '#e8805b', '#f0b54f', '#7fbf73', '#6fc0b5', '#6fa0d8', '#2c4a86', '#8a63d2', '#c86ad6', '#e0679a', '#9c9a92', '#8b8fa3'];
 
 export const BACKGROUNDS = {
+  RatLAN: [
+    ['ratlan', 'RatLAN', 'linear-gradient(180deg, #e36d0f 0 22%, #eef1f4 22%)'],
+    ['ratlan-dark', 'RatLAN Dark', 'linear-gradient(180deg, #ff8a2b 0 22%, #0e1215 22%)'],
+  ],
   Default: [
     ['white', 'White', '#ffffff'],
     ['smoke', 'Smoke Gray', '#ececec'],
@@ -141,5 +145,7 @@ export function applyTheme() {
   const theme = state.prefs.theme || 'white';
   if (theme === 'white') delete root.dataset.theme;
   else root.dataset.theme = theme;
-  root.style.setProperty('--accent', state.prefs.accent || DEFAULT_PREFS.accent);
+  // RatLAN themes bring their own orange accent.
+  if (theme.startsWith('ratlan')) root.style.removeProperty('--accent');
+  else root.style.setProperty('--accent', state.prefs.accent || DEFAULT_PREFS.accent);
 }
