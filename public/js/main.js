@@ -53,7 +53,7 @@ setSignedOutHandler((msg) => {
 
 function renderShell() {
   const brand = state.config.brand || {};
-  document.title = brand.title || 'Mail';
+  document.title = appTitle();
   const me = state.prefs.displayName || state.session.email;
   root.innerHTML = `
   <div class="app">
@@ -463,7 +463,12 @@ async function deleteFolder(path) {
 function updateUnreadBadge() {
   const inbox = state.folders.find((f) => f.specialUse === 'inbox');
   const n = inbox?.unread || 0;
-  document.title = `${n ? `(${n}) ` : ''}${state.config.brand?.title || 'Mail'}`;
+  document.title = `${n ? `(${n}) ` : ''}${appTitle()}`;
+}
+
+// "Mail - josh@ratlan.net - ratmail", like OX's tab title.
+function appTitle() {
+  return ['Mail', state.session?.email, state.config.brand?.title || 'ratmail'].filter(Boolean).join(' - ');
 }
 
 /** Shows a folder picker dialog and resolves with a path (or null). */

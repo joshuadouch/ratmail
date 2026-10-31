@@ -12,7 +12,7 @@ export function renderLogin(root, config, { message, onSignedIn }) {
   } catch {}
   if (!servers.some((s) => s.id === lastServer)) lastServer = servers[0]?.id || '';
 
-  document.title = `Sign in · ${brand.title || 'Mail'}`;
+  document.title = `Sign in - ${brand.title || 'ratmail'}`;
   const host = (s) => s?.host || s?.domain || s?.name || '';
   const footLinks = `${brand.privacyUrl ? `<a href="${esc(brand.privacyUrl)}">Privacy Policy</a>` : ''}${brand.imprintUrl ? `<a href="${esc(brand.imprintUrl)}">Imprint</a>` : ''}`;
   root.innerHTML = `
