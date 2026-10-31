@@ -1,7 +1,7 @@
 // Sign-in page: pick a mail server, enter the mailbox login.
 
 import { api, esc, $ } from './util.js';
-import { brandHtml } from './brand.js';
+import { loginLogoHtml } from './brand.js';
 
 export function renderLogin(root, config, { message, onSignedIn }) {
   const servers = config.servers || [];
@@ -13,30 +13,39 @@ export function renderLogin(root, config, { message, onSignedIn }) {
   if (!servers.some((s) => s.id === lastServer)) lastServer = servers[0]?.id || '';
 
   document.title = `Sign in · ${brand.title || 'Mail'}`;
+  const host = (s) => s?.host || s?.domain || s?.name || '';
+  const footLinks = `${brand.privacyUrl ? `<a href="${esc(brand.privacyUrl)}">Privacy Policy</a>` : ''}${brand.imprintUrl ? `<a href="${esc(brand.imprintUrl)}">Imprint</a>` : ''}`;
   root.innerHTML = `
     <div class="login">
-      <div class="login-top">${brandHtml(brand)}</div>
-      <div class="login-main">
-        <div class="login-card">
-          <h1>${esc(brand.title || 'Mail')}</h1>
-          <form novalidate>
-            <h2>Sign in</h2>
-            <div class="login-error ${message ? '' : 'hidden'}" role="alert">${esc(message || '')}</div>
-            <label class="field ${servers.length > 1 ? '' : 'hidden'}"><span>Mail server</span>
-              <select class="input" name="server">${servers.map((s) => `<option value="${esc(s.id)}" ${s.id === lastServer ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
-            </label>
-            <label class="field"><span>Username</span><input class="input" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required></label>
-            <label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label>
-            <label class="checkbox"><input type="checkbox" name="remember" checked> Stay signed in</label>
-            ${config.turnstile ? '<div class="turnstile"></div>' : ''}
-            <button class="btn btn-primary" type="submit">Sign in</button>
-          </form>
+      <div class="cable" aria-hidden="true"></div>
+      <main class="login-main">
+        <div class="login-col">
+          ${loginLogoHtml(brand)}
+          <p class="login-prompt"><b>$</b> login <i class="login-host"></i></p>
+          <div class="login-card">
+            <form novalidate>
+              <h1>Sign in</h1>
+              <div class="login-error ${message ? '' : 'hidden'}" role="alert">${esc(message || '')}</div>
+              <label class="field ${servers.length > 1 ? '' : 'hidden'}"><span>Mail server</span>
+                <select class="input" name="server">${servers.map((s) => `<option value="${esc(s.id)}" ${s.id === lastServer ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+              </label>
+              <label class="field"><span>Username</span><input class="input" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required></label>
+              <label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label>
+              <label class="checkbox"><input type="checkbox" name="remember" checked> Stay signed in</label>
+              ${config.turnstile ? '<div class="turnstile"></div>' : ''}
+              <button class="btn btn-primary" type="submit">Sign in</button>
+            </form>
+          </div>
         </div>
-      </div>
-      <div class="login-foot">${esc(brand.footer || '')}${brand.privacyUrl ? `<a href="${esc(brand.privacyUrl)}">Privacy Policy</a>` : ''}${brand.imprintUrl ? `<a href="${esc(brand.imprintUrl)}">Imprint</a>` : ''}</div>
+      </main>
+      <footer class="login-foot"><span>${esc(brand.footer || '')}</span>${footLinks ? `<span>${footLinks}</span>` : ''}</footer>
     </div>`;
 
   const form = $('form', root);
+  const hostEl = $('.login-host', root);
+  const showHost = () => { hostEl.textContent = host(servers.find((s) => s.id === form.server.value)); };
+  showHost();
+  form.server.addEventListener('change', showHost);
   const err = $('.login-error', root);
   const btn = $('button[type=submit]', root);
   const user = form.username;
@@ -52,7 +61,7 @@ export function renderLogin(root, config, { message, onSignedIn }) {
     loadTurnstile().then((turnstile) => {
       tsWidget = turnstile.render($('.turnstile', root), {
         sitekey: config.turnstile,
-        theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
+        theme: ['dark', 'light'].includes(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : 'auto',
         callback: (t) => { tsToken = t; },
         'expired-callback': () => { tsToken = ''; },
         'error-callback': () => { tsToken = ''; },

@@ -28,3 +28,23 @@ export function brandHtml(brand = {}) {
   const iconHtml = iconKind === 'mail' ? MAIL_ICON : '<span class="term">&gt;_</span>';
   return `<a class="brand" href="/" aria-label="${esc(bold + light)}">${iconHtml}<span>${esc(bold)}<span class="tld">${esc(light)}</span></span><span class="cursor"></span></a>`;
 }
+
+// Large logo for the sign-in page, drawn like the ratlan.net mark (it follows
+// the page colours): envelope body, orange flap, ">_" prompt.
+const LOGIN_ICON = `<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="4" y="12" width="56" height="42" rx="6" fill="var(--l-fg)"/><path d="M4 18a6 6 0 0 1 6-6h44a6 6 0 0 1 6 6L32 34z" fill="var(--l-accent)"/><path d="M15 36l8 6.5-8 6.5" fill="none" stroke="var(--l-bg)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="28" y="45" width="14" height="4.5" fill="var(--l-accent)"/></svg>`;
+
+export function loginLogoHtml(brand = {}) {
+  if (brand.logoUrl) return `<div class="login-logo"><img src="${esc(brand.logoUrl)}" alt="${esc(brand.title || '')}" style="height:56px"></div>`;
+  let bold = 'mail';
+  let light = '';
+  if (brand.logo && typeof brand.logo === 'object') {
+    bold = brand.logo.bold || '';
+    light = brand.logo.light || '';
+  } else if (brand.logo || brand.title) {
+    const text = brand.logo || brand.title;
+    const dot = text.indexOf('.');
+    bold = dot > 0 ? text.slice(0, dot) : text;
+    light = dot > 0 ? text.slice(dot) : '';
+  }
+  return `<div class="login-logo" role="img" aria-label="${esc(bold + light)}">${LOGIN_ICON}<span class="word">${esc(bold)}<span>${esc(light)}</span><span class="logo-cursor" aria-hidden="true"></span></span></div>`;
+}

@@ -218,7 +218,7 @@ const routes = {
     const cfg = getConfig(env);
     return json({
       brand: cfg.brand || {},
-      servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, domain: s.domain || null })),
+      servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, domain: s.domain || null, host: s.imap?.host || null })),
       turnstile: turnstileSiteKey(env, cfg),
     });
   },
