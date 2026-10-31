@@ -88,7 +88,7 @@ npm run db:init                          # creates the two tables
 npx wrangler deploy
 ```
 
-Then add a custom domain (for example `ratmail.ratlan.net`) to the Worker in the Cloudflare dashboard or under `routes` in `wrangler.jsonc`. The app needs HTTPS for its cookie.
+Then add a custom domain (for example `webmail.ratlan.net (and ratmail.ratlan.net)`) to the Worker in the Cloudflare dashboard or under `routes` in `wrangler.jsonc`. The app needs HTTPS for its cookie.
 
 ### Mailcow notes
 

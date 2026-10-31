@@ -6,7 +6,7 @@
   // Served only on the custom domain (HTTPS is needed for the session cookie).
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [{ "pattern": "ratmail.ratlan.net", "custom_domain": true }],
+  "routes": [{ "pattern": "ratmail.ratlan.net", "custom_domain": true }, { "pattern": "webmail.ratlan.net", "custom_domain": true }],
   // The web app. /api/* goes to the Worker; everything else is a static file.
   "assets": {
     "directory": "public",
