@@ -14,6 +14,7 @@ It signs in against your own mail server (IMAP + SMTP), so it works with Mailcow
 - Compose window: floating, minimise / maximise, rich text toolbar, plain text mode, To/CC/BCC/Reply-To as tokens with suggestions, attachments (button or drag and drop), inline images, priority, read receipt, signature, **drafts autosave**, the OX "external images" prompt when replying
 - Reply, reply all, forward (with attachments), edit drafts, send as new
 - Search (everything / from / to / subject / text, unread, flagged, attachments)
+- **Other mail accounts** (Settings > Accounts > Add mail account): Gmail, Outlook.com, Yahoo, iCloud, AOL, Fastmail, Zoho, GMX or any IMAP/SMTP server. Each one shows in the folder list under its own heading, like Outlook, and can be picked in the compose window's From menu. Server settings fill in by themselves for known providers, then from Thunderbird's settings database or the domain's autoconfig file.
 - Settings: accent colours, backgrounds (white, smoke, solarized, dark, sunsets, unicolour), layout, refresh interval, desktop notifications, signed-in devices, extra From addresses, reading and compose options
 - Works on phones (single pane with a back button)
 
@@ -27,7 +28,8 @@ Browser  ──HTTPS──>  Worker (/api/*)  ──IMAP over TLS (993)──>  
 
 - **No mail is stored.** Every request opens an IMAP connection with `cloudflare:sockets`, does its work and logs out. Sending uses SMTP submission and then saves a copy to Sent.
 - **No secrets in the Worker.** At sign-in the Worker checks the password by logging in to IMAP. It then encrypts the password (AES-GCM) with a new random key. The encrypted password goes into D1, and the key goes only into the browser's `HttpOnly; Secure; SameSite=Strict` cookie. Neither the database nor the cookie alone can reveal the password. Signing out deletes the row.
-- **D1 holds two small tables** (`schema.sql`): `sessions` and `prefs` (theme, layout, signature, trusted image senders, recent recipients) so settings follow you between devices.
+- **D1 holds small tables** (`schema.sql`): `sessions`, `prefs` (theme, layout, signature, trusted image senders, recent recipients) so settings follow you between devices, and `vaults` + `accounts` for other mail accounts. The Worker adds the last two by itself on older databases.
+- **Other accounts' passwords are encrypted without a Worker secret.** Each user has a random vault key. D1 stores it only wrapped with a key derived (PBKDF2) from the user's sign-in password, and each session row holds a copy locked with that browser's cookie key. Account passwords are encrypted with the vault key. If the sign-in password changes, the old vault cannot be opened, so the other accounts ask for their passwords again.
 - **Email HTML is made safe twice:** scripts, event handlers, forms and external resources are stripped with `HTMLRewriter`, and the result is shown in a sandboxed iframe (no scripts) with a strict Content-Security-Policy.
 - Attachments that could run code on this site (HTML, SVG, etc.) are always downloaded, never shown inline.
 - State-changing API calls need an `x-ratmail` header, so other sites cannot forge them.
@@ -42,6 +44,7 @@ The frontend is plain HTML, CSS and JavaScript modules in `public/` (no build st
 | `src/mime.js` | Builds outgoing messages |
 | `src/sanitize.js` | HTML sanitiser |
 | `src/session.js` | Split-key sessions and preferences in D1 |
+| `src/accounts.js` | Other mail accounts: encrypted storage, provider presets, auto-detect |
 | `config/servers.json` | Mail servers and branding |
 
 ## Configure mail servers
@@ -113,6 +116,9 @@ npm test                                 # parser and MIME unit tests
 A minimal Dovecot setup for testing (plaintext on 127.0.0.1 only) is in `scripts/dovecot-test.conf`.
 
 ## Known gaps
+
+- Other accounts sign in with a password. Gmail, Yahoo, iCloud, AOL and Fastmail need an **app password**. Microsoft has switched off password sign-in for most Outlook.com and Microsoft 365 mailboxes, so those need OAuth ("Sign in with Microsoft"), which is not built yet.
+- Every expanded account in the folder list is refreshed on the refresh interval (one IMAP login each).
 
 - Each API call opens a fresh IMAP connection (about 100–300 ms depending on where the mail server is). A Durable Object could keep one open per user later if this feels slow.
 - No conversation threading, address book or server-side filters (Sieve).

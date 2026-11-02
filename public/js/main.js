@@ -1,8 +1,8 @@
 // ratmail web app: shell, folder tree, message list and reading pane.
 
-import { api, $, $$, h, esc, showMenu, dialog, confirmDialog, prompt, toast, initials, displayName, shortDate, fullDate, relativeTime, formatSize, countLabel, setSignedOutHandler } from './util.js';
+import { api, $, $$, h, esc, showMenu, dialog, confirmDialog, prompt, toast, initials, displayName, shortDate, fullDate, relativeTime, formatSize, countLabel, setSignedOutHandler, setDefaultAccount, acctQuery } from './util.js';
 import { icon } from './icons.js';
-import { state, loadCachedPrefs, applyServerPrefs, setPrefs, onPrefsChange, applyTheme, folderByUse, myAddresses } from './state.js';
+import { state, loadCachedPrefs, applyServerPrefs, setPrefs, onPrefsChange, applyTheme, folderByUse, myAddresses, accountById, accountTitle } from './state.js';
 import { renderLogin } from './login.js';
 import { brandHtml } from './brand.js';
 import { openCompose, composeFromMessage, hasOpenCompose } from './compose.js';
@@ -10,6 +10,18 @@ import { openSettings, settingsMenu } from './settings.js';
 
 const root = document.getElementById('app');
 const PAGE = 50;
+
+// API calls go to the account whose folder is selected unless they say otherwise.
+setDefaultAccount(() => state.account);
+
+// URL hash: #folder=INBOX for the sign-in account, #acct=<id>&folder=INBOX for others.
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  return { acct: p.get('acct') || '', folder: p.get('folder') || '' };
+}
+function hashFor(acct, folder) {
+  return `#${acct ? `acct=${encodeURIComponent(acct)}&` : ''}folder=${encodeURIComponent(folder)}`;
+}
 
 // ===========================================================================
 // Boot
@@ -34,10 +46,17 @@ async function boot(message) {
   }
   applyServerPrefs(state.session.prefs);
   applyTheme();
+  state.accounts = state.session.accounts || [];
+  state.folderSets = {};
+  state.folderErrors = {};
+  state.knownInbox = {};
+  const want = readHash();
+  state.account = want.acct && accountById(want.acct) && !accountById(want.acct).locked ? want.acct : '';
+  state.folders = [];
   renderShell();
   await refreshFolders();
-  const want = decodeURIComponent((location.hash.match(/^#folder=([^&]+)/) || [])[1] || '') || 'INBOX';
-  selectFolder(state.folders.some((f) => f.path === want) ? want : 'INBOX');
+  const folder = want.folder || 'INBOX';
+  selectFolder(state.folders.some((f) => f.path === folder) ? folder : 'INBOX', state.account);
   startTimers();
 }
 
@@ -209,8 +228,10 @@ function bindShell() {
 
   document.addEventListener('keydown', onGlobalKey);
   window.addEventListener('hashchange', () => {
-    const want = decodeURIComponent((location.hash.match(/^#folder=([^&]+)/) || [])[1] || '');
-    if (want && want !== state.folder && state.folders.some((f) => f.path === want)) selectFolder(want);
+    const want = readHash();
+    if (!want.folder || (want.folder === state.folder && want.acct === state.account)) return;
+    if (want.acct && !accountById(want.acct)) return;
+    selectFolder(want.folder, want.acct);
   });
 }
 
@@ -222,7 +243,7 @@ const shellActions = {
   'go-inbox': () => {
     $('.topbar [data-act="go-inbox"] .badge-dot').classList.add('hidden');
     cancelSearch(true);
-    selectFolder('INBOX');
+    selectFolder('INBOX', state.account);
   },
   compose: () => openCompose({ mode: 'new' }),
   'compose-menu': (b) =>
@@ -240,6 +261,7 @@ const shellActions = {
         { header: `${state.prefs.displayName || ''}${state.prefs.displayName ? ' · ' : ''}${state.session.email}` },
         { label: 'Settings', icon: 'settings', action: () => openSettings() },
         { label: 'Accounts', icon: 'account', action: () => openSettings('accounts') },
+        { label: 'Add mail account …', icon: 'plus', action: () => openSettings('accounts', { add: true }) },
         '-',
         { label: 'Sign out', icon: 'logout', action: signOut },
       ],
@@ -272,19 +294,48 @@ export function folderLabel(f) {
   return f.name.split(f.delimiter).pop();
 }
 
-export async function refreshFolders() {
+/** Folders of one account ('' = the sign-in account). */
+function foldersOf(acct) {
+  return state.folderSets[acct] || [];
+}
+
+// Sidebar tree open/closed state. The sign-in account keeps its old keys
+// (_account, _mine, folder paths); extra accounts prefix them with "<id>:".
+function openKey(acct, key) {
+  return acct ? `${acct}:${key}` : key;
+}
+
+function accountOpen(acct) {
+  const open = state.prefs.folderOpen || {};
+  return open[openKey(acct, '_account')] !== false;
+}
+
+async function loadFolders(acct) {
   try {
-    const { folders } = await api('folders');
-    state.folders = folders;
+    const { folders } = await api('folders', { acct });
+    state.folderSets[acct] = folders;
+    delete state.folderErrors[acct];
   } catch (e) {
-    toast(e.message, { type: 'error' });
+    state.folderErrors[acct] = e.message;
+    if (acct === state.account) toast(e.message, { type: 'error' });
   }
+}
+
+/**
+ * Reloads folder lists: the sign-in account, the selected account and every
+ * extra account that is expanded in the sidebar.
+ */
+export async function refreshFolders() {
+  const ids = new Set(['', state.account]);
+  for (const a of state.accounts) if (!a.locked && accountOpen(a.id)) ids.add(a.id);
+  await Promise.all([...ids].map(loadFolders));
+  state.folders = foldersOf(state.account);
   renderFolders();
   checkNewMail();
 }
 
-function folderChildren(parentPath) {
-  return state.folders
+function folderChildren(folders, parentPath) {
+  return folders
     .filter((f) => {
       const d = f.delimiter;
       const idx = f.path.lastIndexOf(d);
@@ -294,49 +345,74 @@ function folderChildren(parentPath) {
     .sort((a, b) => folderLabel(a).localeCompare(folderLabel(b)));
 }
 
-function renderFolders() {
-  const nav = $('.folders');
-  if (!nav) return;
+/** Sidebar section for one account: its special folders, then "My folders". */
+function accountTree(acct) {
+  const folders = foldersOf(acct);
   const open = state.prefs.folderOpen || {};
-  const special = FOLDER_ORDER.map((u) => state.folders.find((f) => f.specialUse === u && (u !== 'archive' || true))).filter(Boolean);
+  const key = (k) => openKey(acct, k);
+  const special = FOLDER_ORDER.map((u) => folders.find((f) => f.specialUse === u)).filter(Boolean);
   const specialPaths = new Set(special.map((f) => f.path));
-  const mine = state.folders.filter((f) => {
+  const mine = folders.filter((f) => {
     if (specialPaths.has(f.path)) return false;
     const idx = f.path.lastIndexOf(f.delimiter);
     const parent = idx < 0 ? '' : f.path.slice(0, idx);
     return parent === '' || specialPaths.has(parent);
   });
-  const account = state.session.email.split('@')[1] || state.session.email;
-  const mineUnread = state.folders.filter((f) => !specialPaths.has(f.path)).reduce((n, f) => n + (f.unread || 0), 0);
+  const mineUnread = folders.filter((f) => !specialPaths.has(f.path)).reduce((n, f) => n + (f.unread || 0), 0);
+  const inboxUnread = folders.find((f) => f.specialUse === 'inbox')?.unread || 0;
+  const a = acct ? accountById(acct) : null;
+  const title = acct ? accountTitle(acct) : state.session.email.split('@')[1] || state.session.email;
+  const isOpen = accountOpen(acct);
 
   const row = (f, depth) => {
-    const kids = folderChildren(f.path).filter((k) => !specialPaths.has(k.path));
-    const isOpen = open[f.path];
+    const kids = folderChildren(folders, f.path).filter((k) => !specialPaths.has(k.path));
+    const kidsOpen = open[key(f.path)];
     const use = f.specialUse && FOLDER_ICON[f.specialUse] ? f.specialUse : null;
     const count = f.specialUse === 'drafts' ? f.total : f.specialUse === 'trash' || f.specialUse === 'junk' ? f.unread || f.total : f.unread;
-    const muted = f.specialUse === 'trash' || f.specialUse === 'junk' || f.specialUse === 'drafts' ? '' : '';
-    let html = `<div class="folder ${state.folder === f.path && !state.list.search ? 'selected' : ''}" style="--depth:${depth}" data-path="${esc(f.path)}" ${f.selectable ? '' : 'data-noselect="1"'} title="${esc(folderLabel(f))}">
-      ${kids.length ? `<span class="twisty" data-twisty="${esc(f.path)}">${icon(isOpen ? 'chevronDown' : 'chevronRight')}</span>` : ''}
+    const selected = state.account === acct && state.folder === f.path && !state.list.search;
+    let html = `<div class="folder ${selected ? 'selected' : ''}" style="--depth:${depth}" data-acct="${esc(acct)}" data-path="${esc(f.path)}" ${f.selectable ? '' : 'data-noselect="1"'} title="${esc(folderLabel(f))}">
+      ${kids.length ? `<span class="twisty" data-twisty="${esc(key(f.path))}">${icon(kidsOpen ? 'chevronDown' : 'chevronRight')}</span>` : ''}
       ${icon(use ? FOLDER_ICON[use] : 'folder')}
       <span class="name">${esc(folderLabel(f))}</span>
-      ${count ? `<span class="count ${muted}">${countLabel(count)}</span>` : ''}
+      ${count ? `<span class="count">${countLabel(count)}</span>` : ''}
       <button class="icon-btn small folder-menu" data-folder-menu="${esc(f.path)}" title="Folder actions">${icon('more')}</button>
     </div>`;
-    if (kids.length && isOpen) html += kids.map((k) => row(k, depth + 1)).join('');
+    if (kids.length && kidsOpen) html += kids.map((k) => row(k, depth + 1)).join('');
     return html;
   };
 
-  nav.innerHTML = `
-    <div class="tree-head" data-toggle="_account">${icon(open._account !== false ? 'chevronDown' : 'chevronRight')}<span>${esc(account)}</span></div>
-    ${open._account !== false ? special.map((f) => row(f, 1)).join('') : ''}
-    <div class="folders-gap"></div>
-    <div class="folder" style="--depth:0" data-toggle="_mine">
-      <span class="twisty">${icon(open._mine ? 'chevronDown' : 'chevronRight')}</span>
+  let html = `<div class="tree-head ${acct ? 'acct-head' : ''}" data-toggle="${esc(key('_account'))}" data-acct="${esc(acct)}" title="${esc(acct ? a?.email || '' : state.session.email)}">
+    ${icon(isOpen ? 'chevronDown' : 'chevronRight')}<span class="acct-title">${esc(title)}</span>
+    ${!isOpen && inboxUnread ? `<span class="count">${countLabel(inboxUnread)}</span>` : ''}
+    ${acct ? `<button class="icon-btn small folder-menu" data-acct-menu="${esc(acct)}" title="Account actions">${icon('more')}</button>` : ''}
+  </div>`;
+  if (!isOpen) return html;
+  if (a?.locked) {
+    return html + `<div class="folder muted acct-note" style="--depth:1" data-acct-fix="${esc(acct)}">${icon('shield')}<span class="name">Enter password …</span></div>`;
+  }
+  if (state.folderErrors[acct] && !folders.length) {
+    return html + `<div class="folder muted acct-note" style="--depth:1" data-acct-retry="${esc(acct)}" title="${esc(state.folderErrors[acct])}">${icon('refresh')}<span class="name">Could not load folders. Retry</span></div>`;
+  }
+  if (!folders.length) return html + '<div class="folder muted" style="--depth:1;cursor:default"><span class="name">Loading …</span></div>';
+  html += special.map((f) => row(f, 1)).join('');
+  html += `<div class="folders-gap"></div>
+    <div class="folder" style="--depth:${acct ? 1 : 0}" data-toggle="${esc(key('_mine'))}" data-acct="${esc(acct)}">
+      <span class="twisty">${icon(open[key('_mine')] ? 'chevronDown' : 'chevronRight')}</span>
       ${icon('folder')}<span class="name">My folders</span>
-      ${!open._mine && mineUnread ? `<span class="count">${countLabel(mineUnread)}</span>` : ''}
-      <button class="icon-btn small add" data-act-folder="create" title="Add new folder">${icon('plus')}</button>
-    </div>
-    ${open._mine ? mine.map((f) => row(f, 1)).join('') || '<div class="folder muted" style="--depth:1;cursor:default">No folders</div>' : ''}`;
+      ${!open[key('_mine')] && mineUnread ? `<span class="count">${countLabel(mineUnread)}</span>` : ''}
+      <button class="icon-btn small add" data-act-folder="create" data-acct="${esc(acct)}" title="Add new folder">${icon('plus')}</button>
+    </div>`;
+  if (open[key('_mine')]) html += mine.map((f) => row(f, acct ? 2 : 1)).join('') || `<div class="folder muted" style="--depth:${acct ? 2 : 1};cursor:default">No folders</div>`;
+  return html;
+}
+
+function renderFolders() {
+  const nav = $('.folders');
+  if (!nav) return;
+  nav.innerHTML =
+    accountTree('') +
+    state.accounts.map((a) => `<div class="acct-gap"></div>${accountTree(a.id)}`).join('') +
+    `<button type="button" class="add-account" data-add-account>${icon('plus')}<span>Add mail account</span></button>`;
 
   if (!nav.dataset.bound) {
     nav.dataset.bound = '1';
@@ -355,7 +431,8 @@ function renderFolders() {
       if (!f) return;
       e.preventDefault();
       try {
-        const { folder, uids } = JSON.parse(e.dataTransfer.getData('application/x-ratmail-uids'));
+        const { folder, uids, acct = '' } = JSON.parse(e.dataTransfer.getData('application/x-ratmail-uids'));
+        if (acct !== f.dataset.acct) return toast('Messages can only be moved between folders of the same account', { type: 'error' });
         if (folder !== f.dataset.path) moveMessages(uids, f.dataset.path, folder);
       } catch {}
     });
@@ -367,15 +444,25 @@ function onFolderClick(e) {
   const tw = e.target.closest('[data-twisty]');
   const toggle = e.target.closest('[data-toggle]');
   const menuBtn = e.target.closest('[data-folder-menu]');
+  const acctMenuBtn = e.target.closest('[data-acct-menu]');
   const create = e.target.closest('[data-act-folder="create"]');
   const open = { ...(state.prefs.folderOpen || {}) };
+  if (e.target.closest('[data-add-account]')) return openSettings('accounts', { add: true });
+  const fix = e.target.closest('[data-acct-fix]');
+  if (fix) return openSettings('accounts', { edit: fix.dataset.acctFix });
+  const retry = e.target.closest('[data-acct-retry]');
+  if (retry) return loadFolders(retry.dataset.acctRetry).then(renderFolders);
   if (create) {
     e.stopPropagation();
-    return createFolder('');
+    return createFolder('', create.dataset.acct || '');
+  }
+  if (acctMenuBtn) {
+    e.stopPropagation();
+    return accountMenu(acctMenuBtn, acctMenuBtn.dataset.acctMenu);
   }
   if (menuBtn) {
     e.stopPropagation();
-    return folderMenu(menuBtn, menuBtn.dataset.folderMenu);
+    return folderMenu(menuBtn, menuBtn.dataset.folderMenu, menuBtn.closest('[data-acct]')?.dataset.acct || '');
   }
   if (tw) {
     e.stopPropagation();
@@ -385,90 +472,109 @@ function onFolderClick(e) {
   }
   if (toggle) {
     const k = toggle.dataset.toggle;
-    open[k] = k === '_account' ? open[k] === false : !open[k];
+    const isHead = /(^|:)_account$/.test(k);
+    open[k] = isHead ? open[k] === false : !open[k];
     setPrefs({ folderOpen: open });
-    return renderFolders();
+    renderFolders();
+    // Expanding an extra account loads its folders the first time.
+    const acct = toggle.dataset.acct || '';
+    if (isHead && open[k] !== false && acct && !state.folderSets[acct] && !accountById(acct)?.locked) loadFolders(acct).then(renderFolders);
+    return;
   }
   const f = e.target.closest('.folder[data-path]');
   if (f && !f.dataset.noselect) {
     cancelSearch(true);
-    selectFolder(f.dataset.path);
+    selectFolder(f.dataset.path, f.dataset.acct || '');
     app().classList.remove('side-open');
   }
 }
 
-function folderMenu(anchor, path) {
-  const f = state.folders.find((x) => x.path === path);
+function accountMenu(anchor, acct) {
+  showMenu(anchor, [
+    { header: accountById(acct)?.email || '' },
+    { label: 'Refresh folders', icon: 'refresh', action: () => loadFolders(acct).then(renderFolders) },
+    { label: 'Add new folder', icon: 'plus', action: () => createFolder('', acct) },
+    { label: 'Account settings …', icon: 'settings', action: () => openSettings('accounts', { edit: acct }) },
+  ]);
+}
+
+function folderMenu(anchor, path, acct = state.account) {
+  const f = foldersOf(acct).find((x) => x.path === path);
   const special = !!f?.specialUse;
   const items = [
-    { label: 'Mark all messages as read', icon: 'markRead', action: () => folderAction('markRead', path) },
+    { label: 'Mark all messages as read', icon: 'markRead', action: () => folderAction('markRead', path, {}, acct) },
   ];
-  if (f?.specialUse === 'trash' || f?.specialUse === 'junk') items.push({ label: 'Empty folder', icon: 'trash', danger: true, action: () => emptyFolder(path) });
-  items.push('-', { label: 'Add new folder', icon: 'plus', action: () => createFolder(path) });
+  if (f?.specialUse === 'trash' || f?.specialUse === 'junk') items.push({ label: 'Empty folder', icon: 'trash', danger: true, action: () => emptyFolder(path, acct) });
+  items.push('-', { label: 'Add new folder', icon: 'plus', action: () => createFolder(path, acct) });
   if (!special) {
-    items.push({ label: 'Rename', icon: 'edit', action: () => renameFolder(path) });
-    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => deleteFolder(path) });
+    items.push({ label: 'Rename', icon: 'edit', action: () => renameFolder(path, acct) });
+    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => deleteFolder(path, acct) });
   }
   showMenu(anchor, items);
 }
 
-async function folderAction(action, path, extra = {}) {
+async function folderAction(action, path, extra = {}, acct = state.account) {
   try {
-    await api('folders', { method: 'POST', body: { action, path, ...extra } });
-    await refreshFolders();
-    if (state.folder === path) reloadList();
+    await api('folders', { method: 'POST', body: { action, path, ...extra }, acct });
+    await loadFolders(acct);
+    if (acct === state.account) state.folders = foldersOf(acct);
+    renderFolders();
+    if (state.folder === path && state.account === acct) reloadList();
   } catch (e) {
     toast(e.message, { type: 'error' });
   }
 }
 
-async function emptyFolder(path) {
-  const f = state.folders.find((x) => x.path === path);
-  if (await confirmDialog('Empty folder', `Do you really want to permanently delete all messages in "${folderLabel(f)}"?`, { ok: 'Empty folder', danger: true })) folderAction('empty', path);
+async function emptyFolder(path, acct = state.account) {
+  const f = foldersOf(acct).find((x) => x.path === path);
+  if (await confirmDialog('Empty folder', `Do you really want to permanently delete all messages in "${folderLabel(f)}"?`, { ok: 'Empty folder', danger: true })) folderAction('empty', path, {}, acct);
 }
 
-async function createFolder(parent) {
+async function createFolder(parent, acct = state.account) {
   const name = await prompt('Add new folder', { label: 'Folder name', ok: 'Add' });
   if (!name) return;
-  const delim = state.folders[0]?.delimiter || '/';
+  const delim = foldersOf(acct)[0]?.delimiter || '/';
   const path = parent ? parent + delim + name : name;
   try {
-    await api('folders', { method: 'POST', body: { action: 'create', path } });
-    const open = { ...(state.prefs.folderOpen || {}), _mine: true };
-    if (parent) open[parent] = true;
+    await api('folders', { method: 'POST', body: { action: 'create', path }, acct });
+    const open = { ...(state.prefs.folderOpen || {}), [openKey(acct, '_mine')]: true };
+    if (parent) open[openKey(acct, parent)] = true;
     setPrefs({ folderOpen: open });
-    await refreshFolders();
+    await loadFolders(acct);
+    if (acct === state.account) state.folders = foldersOf(acct);
+    renderFolders();
   } catch (e) {
     toast(e.message, { type: 'error' });
   }
 }
 
-async function renameFolder(path) {
-  const f = state.folders.find((x) => x.path === path);
+async function renameFolder(path, acct = state.account) {
+  const f = foldersOf(acct).find((x) => x.path === path);
   const name = await prompt('Rename folder', { label: 'Folder name', value: folderLabel(f), ok: 'Rename' });
   if (!name || name === folderLabel(f)) return;
   const idx = path.lastIndexOf(f.delimiter);
   const to = (idx < 0 ? '' : path.slice(0, idx + 1)) + name;
-  await folderAction('rename', path, { to });
-  if (state.folder === path) selectFolder(to);
+  await folderAction('rename', path, { to }, acct);
+  if (state.folder === path && state.account === acct) selectFolder(to, acct);
 }
 
-async function deleteFolder(path) {
-  const f = state.folders.find((x) => x.path === path);
+async function deleteFolder(path, acct = state.account) {
+  const f = foldersOf(acct).find((x) => x.path === path);
   if (!(await confirmDialog('Delete folder', `Do you really want to delete "${folderLabel(f)}" and all messages in it?`, { ok: 'Delete', danger: true }))) return;
-  await folderAction('delete', path);
-  if (state.folder === path) selectFolder('INBOX');
+  await folderAction('delete', path, {}, acct);
+  if (state.folder === path && state.account === acct) selectFolder('INBOX', acct);
 }
 
 function updateUnreadBadge() {
-  const inbox = state.folders.find((f) => f.specialUse === 'inbox');
-  const n = inbox?.unread || 0;
+  // Unread in every loaded account's inbox.
+  const n = Object.values(state.folderSets).reduce((sum, list) => sum + (list.find((f) => f.specialUse === 'inbox')?.unread || 0), 0);
   document.title = `${n ? `(${n}) ` : ''}${appTitle()}`;
 }
 
 // "Mail - josh@ratlan.net - ratmail", like OX's tab title.
 function appTitle() {
-  return ['Mail', state.session?.email, state.config.brand?.title || 'ratmail'].filter(Boolean).join(' - ');
+  const email = state.account ? accountById(state.account)?.email : state.session?.email;
+  return ['Mail', email, state.config.brand?.title || 'ratmail'].filter(Boolean).join(' - ');
 }
 
 /** Shows a folder picker dialog and resolves with a path (or null). */
@@ -497,16 +603,28 @@ export function pickFolder(title, { exclude } = {}) {
 // ===========================================================================
 // Message list
 
-export function selectFolder(path) {
+export function selectFolder(path, acct = state.account) {
+  const switched = acct !== state.account;
+  state.account = acct;
+  state.folders = foldersOf(acct);
   state.folder = path;
   state.selection.clear();
   state.cursor = state.anchor = null;
   state.open = null;
   app()?.classList.remove('reading');
-  if (location.hash !== `#folder=${encodeURIComponent(path)}`) history.replaceState(null, '', `#folder=${encodeURIComponent(path)}`);
+  if (location.hash !== hashFor(acct, path)) history.replaceState(null, '', hashFor(acct, path));
+  if (switched) document.title = appTitle();
   renderFolders();
   renderReader();
   reloadList();
+  // First visit to an account in this page load: fetch its folders too.
+  if (!state.folderSets[acct]) {
+    loadFolders(acct).then(() => {
+      if (state.account === acct) state.folders = foldersOf(acct);
+      renderFolders();
+      renderListHead();
+    });
+  }
 }
 
 function currentFolder() {
@@ -761,7 +879,7 @@ function onDragStart(e) {
     renderList();
   }
   const uids = [...state.selection];
-  e.dataTransfer.setData('application/x-ratmail-uids', JSON.stringify({ folder: state.folder, uids }));
+  e.dataTransfer.setData('application/x-ratmail-uids', JSON.stringify({ folder: state.folder, uids, acct: state.account }));
   e.dataTransfer.effectAllowed = 'move';
   const ghost = h(`<div style="position:fixed;top:-100px;padding:6px 12px;background:var(--accent);color:#fff;border-radius:4px;font:600 12px var(--font)">${uids.length} ${uids.length === 1 ? 'message' : 'messages'}</div>`);
   document.body.append(ghost);
@@ -861,6 +979,7 @@ async function openMessage(uid, { images } = {}) {
     const data = await api('message', { query: { folder, uid, images: showImages ? '1' : '', seen: markSeen ? '' : '0' } });
     if (token !== readerToken) return;
     data.imagesShown = showImages;
+    data.acct = state.account;
     state.open = { uid, folder, data };
     if (m && markSeen && !m.seen) {
       m.seen = true;
@@ -1157,8 +1276,8 @@ function messageMenuItems() {
   if (one) {
     items.push('-');
     items.push({ label: 'Print', icon: 'print', action: () => printMessage(one) });
-    items.push({ label: 'Show source', icon: 'source', action: () => window.open(`/api/source?folder=${encodeURIComponent(one.folder)}&uid=${one.uid}`, '_blank', 'noopener') });
-    items.push({ label: 'Save as file', icon: 'download', action: () => (location.href = `/api/source?folder=${encodeURIComponent(one.folder)}&uid=${one.uid}&download=1`) });
+    items.push({ label: 'Show source', icon: 'source', action: () => window.open(`/api/source?${acctQuery(state.account)}folder=${encodeURIComponent(one.folder)}&uid=${one.uid}`, '_blank', 'noopener') });
+    items.push({ label: 'Save as file', icon: 'download', action: () => (location.href = `/api/source?${acctQuery(state.account)}folder=${encodeURIComponent(one.folder)}&uid=${one.uid}&download=1`) });
     items.push({ label: 'Send as new email', icon: 'edit', action: () => composeFromMessage('editCopy', one) });
   }
   items.push('-', { label: 'Delete', icon: 'trash', danger: true, action: () => deleteSelected() });
@@ -1184,6 +1303,7 @@ function printMessage(m) {
 async function editDraft(uid) {
   try {
     const data = state.open?.uid === uid && state.open.data?.imagesShown ? state.open.data : await api('message', { query: { folder: state.folder, uid, images: '1', seen: '0' } });
+    data.acct = state.account;
     composeFromMessage('draft', data);
   } catch (e) {
     toast(e.message, { type: 'error' });
@@ -1339,27 +1459,32 @@ export async function refreshAll(manual) {
 }
 
 async function checkNewMail() {
-  const inbox = state.folders.find((f) => f.specialUse === 'inbox');
+  for (const [acct, folders] of Object.entries(state.folderSets)) checkNewMailIn(acct, folders);
+}
+
+async function checkNewMailIn(acct, folders) {
+  const inbox = folders.find((f) => f.specialUse === 'inbox');
   if (!inbox) return;
-  const prev = state.knownInbox;
-  state.knownInbox = { total: inbox.total, unread: inbox.unread };
+  const prev = state.knownInbox[acct];
+  state.knownInbox[acct] = { total: inbox.total, unread: inbox.unread };
   if (!prev || inbox.total <= prev.total || inbox.unread <= prev.unread) return;
   // Fetch the newest few messages to describe them.
   try {
     const n = Math.min(inbox.total - prev.total, 5);
-    const res = await api('messages', { query: { folder: inbox.path, offset: 0, limit: n } });
+    const res = await api('messages', { query: { folder: inbox.path, offset: 0, limit: n }, acct });
     const fresh = res.messages.filter((m) => !m.seen);
     if (!fresh.length) return;
-    for (const m of fresh) state.notifications.unshift({ uid: m.uid, from: displayName(m.from[0]), subject: m.subject, at: Date.now() });
+    for (const m of fresh) state.notifications.unshift({ uid: m.uid, acct, from: displayName(m.from[0]), subject: m.subject, at: Date.now() });
     state.notifications = state.notifications.slice(0, 20);
     $('.notif-dot')?.classList.remove('hidden');
     $('[data-act="go-inbox"] .badge-dot')?.classList.remove('hidden');
     if (state.prefs.notifications && 'Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
       const m = fresh[0];
-      const note = new Notification(fresh.length > 1 ? `${fresh.length} new messages` : displayName(m.from[0]) || 'New message', { body: m.subject, tag: 'ratmail', icon: '/favicon.svg' });
+      const title = fresh.length > 1 ? `${fresh.length} new messages` : displayName(m.from[0]) || 'New message';
+      const note = new Notification(state.accounts.length ? `${title} (${accountTitle(acct)})` : title, { body: m.subject, tag: `ratmail-${acct}`, icon: '/favicon.svg' });
       note.onclick = () => {
         window.focus();
-        selectFolder(inbox.path);
+        selectFolder(inbox.path, acct);
       };
     }
   } catch {}
@@ -1369,7 +1494,7 @@ function showNotifications(anchor) {
   $('.notif-dot')?.classList.add('hidden');
   const list = state.notifications;
   showMenu(anchor, list.length
-    ? [{ header: 'New messages' }, ...list.slice(0, 10).map((n) => ({ label: `${n.from}: ${n.subject || '(no subject)'}`, icon: 'mail', action: () => { cancelSearch(true); selectFolder('INBOX'); setTimeout(() => { state.selection = new Set([n.uid]); state.cursor = n.uid; afterSelection(); }, 600); } })), '-', { label: 'Clear notifications', action: () => (state.notifications = []) }]
+    ? [{ header: 'New messages' }, ...list.slice(0, 10).map((n) => ({ label: `${n.from}: ${n.subject || '(no subject)'}`, icon: 'mail', action: () => { cancelSearch(true); selectFolder('INBOX', n.acct || ''); setTimeout(() => { state.selection = new Set([n.uid]); state.cursor = n.uid; afterSelection(); }, 600); } })), '-', { label: 'Clear notifications', action: () => (state.notifications = []) }]
     : [{ header: 'No new notifications' }, ...(state.prefs.notifications ? [] : ['-', { label: 'Turn on desktop notifications', icon: 'bell', action: () => openSettings('notifications') }])], { align: 'right', className: 'notif-list' });
 }
 
@@ -1392,6 +1517,17 @@ function showHelp() {
 }
 
 // Exposed to compose/settings modules
-export const appApi = { refreshAll, refreshFolders, reloadList, selectFolder, currentFolder: () => currentFolder(), applyLayout };
+/** Called by settings after extra accounts are added, edited or removed. */
+async function accountsChanged(list) {
+  state.accounts = list;
+  for (const id of Object.keys(state.folderSets)) {
+    if (id && !accountById(id)) delete state.folderSets[id];
+  }
+  if (state.account && (!accountById(state.account) || accountById(state.account).locked)) selectFolder('INBOX', '');
+  renderFolders();
+  await refreshFolders();
+}
+
+export const appApi = { refreshAll, refreshFolders, reloadList, selectFolder, currentFolder: () => currentFolder(), applyLayout, accountsChanged, foldersOf: (a) => foldersOf(a) };
 
 boot();

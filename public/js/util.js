@@ -30,13 +30,25 @@ export function setSignedOutHandler(fn) {
   onSignedOut = fn;
 }
 
-export async function api(path, { method = 'GET', body, form, query } = {}) {
+// The mail account calls go to when they don't name one ('' = the account
+// the user signed in with). main.js points this at the selected account.
+let defaultAccount = () => '';
+export function setDefaultAccount(fn) {
+  defaultAccount = fn;
+}
+
+/** Adds ?acct= for an extra account to an /api URL. */
+export function acctQuery(acct) {
+  return acct ? `acct=${encodeURIComponent(acct)}&` : '';
+}
+
+export async function api(path, { method = 'GET', body, form, query, acct } = {}) {
   let url = '/api/' + path;
-  if (query) {
-    const q = new URLSearchParams();
-    for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null && v !== '') q.set(k, v);
-    url += '?' + q;
-  }
+  const q = new URLSearchParams();
+  const a = acct === undefined ? defaultAccount() : acct;
+  if (a) q.set('acct', a);
+  for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null && v !== '') q.set(k, v);
+  if ([...q].length) url += '?' + q;
   const headers = { 'x-ratmail': '1' };
   let payload;
   if (form) payload = form;

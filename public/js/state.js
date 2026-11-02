@@ -32,8 +32,12 @@ export const state = {
   config: null,
   session: null,
   prefs: { ...DEFAULT_PREFS },
-  folders: [],
+  folders: [], // folders of the selected account
   folder: 'INBOX',
+  account: '', // '' = the account the user signed in with, else an extra account id
+  accounts: [], // extra accounts [{ id, email, name, label, provider, locked }]
+  folderSets: {}, // account id -> folders
+  folderErrors: {}, // account id -> error message
   list: { messages: [], total: 0, loading: false, done: false, search: null, error: null },
   selection: new Set(),
   cursor: null,
@@ -89,14 +93,30 @@ export function rememberContacts(list) {
   setPrefs({ contacts: [...map.values()].slice(-300) });
 }
 
-export function folderByUse(use) {
-  return state.folders.find((f) => f.specialUse === use);
+export function folderByUse(use, acct = state.account) {
+  return (state.folderSets[acct] || (acct === state.account ? state.folders : [])).find((f) => f.specialUse === use);
 }
 
+export function accountById(id) {
+  return state.accounts.find((a) => a.id === id) || null;
+}
+
+/** Display title for an account in the sidebar and menus. */
+export function accountTitle(id) {
+  if (!id) return state.session.email;
+  const a = accountById(id);
+  return a ? a.label || a.email : 'Account';
+}
+
+/**
+ * Addresses the user can send from. Each says which account sends it:
+ * account '' (the sign-in account and its aliases) or an extra account id.
+ */
 export function identities() {
-  const main = { name: state.prefs.displayName || '', email: state.session.email };
-  const extra = (state.prefs.identities || []).filter((i) => i.email && i.email.toLowerCase() !== main.email.toLowerCase());
-  return [main, ...extra];
+  const main = { name: state.prefs.displayName || '', email: state.session.email, account: '' };
+  const extra = (state.prefs.identities || []).filter((i) => i.email && i.email.toLowerCase() !== main.email.toLowerCase()).map((i) => ({ ...i, account: '' }));
+  const others = state.accounts.filter((a) => !a.locked).map((a) => ({ name: a.name || state.prefs.displayName || '', email: a.email, account: a.id }));
+  return [main, ...extra, ...others];
 }
 
 export function myAddresses() {

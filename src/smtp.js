@@ -40,7 +40,7 @@ class Conn {
  * Sends one message.
  * @param server  { host, port, tls }
  * @param auth    { username, password }
- * @param envelope { from, recipients: [] }
+ * @param envelope { from, recipients: [] }, or null to only check the login
  * @param data    message as a binary string with CRLF line endings
  */
 export async function sendMail(server, auth, envelope, data, heloName = 'ratmail', clientIp = null) {
@@ -80,6 +80,11 @@ export async function sendMail(server, auth, envelope, data, heloName = 'ratmail
       await c.cmd(btoa(pass), [235]);
     } else {
       throw new SmtpError('The mail server offers no supported login method');
+    }
+    if (!envelope) {
+      // Login check only (adding an account).
+      try { await c.writer.write('QUIT\r\n'); } catch {}
+      return { response: 'authenticated' };
     }
     const smtpUtf8 = caps.some((l) => l === 'SMTPUTF8');
     await c.cmd(`MAIL FROM:<${envelope.from}>${smtpUtf8 && /[^\x00-\x7f]/.test(envelope.from) ? ' SMTPUTF8' : ''}`, [250]);

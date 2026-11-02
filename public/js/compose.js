@@ -3,7 +3,7 @@
 
 import { api, $, $$, h, esc, showMenu, dialog, toast, formatSize, parseAddressList, isEmail, fullDate, relativeTime } from './util.js';
 import { icon } from './icons.js';
-import { state, identities, rememberContacts, myAddresses, folderByUse } from './state.js';
+import { state, identities, rememberContacts, myAddresses, folderByUse, accountTitle } from './state.js';
 import { appApi } from './main.js';
 
 const windows = new Set();
@@ -66,7 +66,7 @@ export async function composeFromMessage(mode, m) {
     if (!choice) return;
     if (choice === 'with') {
       try {
-        source = await api('message', { query: { folder: m.folder, uid: m.uid, images: '1', seen: '0' } });
+        source = await api('message', { query: { folder: m.folder, uid: m.uid, images: '1', seen: '0' }, acct: m.acct || '' });
         source.imagesShown = true;
       } catch (e) {
         toast(e.message, { type: 'error' });
@@ -79,7 +79,8 @@ export async function composeFromMessage(mode, m) {
   const from = flat(m.from);
   const replyTo = flat(m.replyTo).length ? flat(m.replyTo) : from;
   const identity = pickIdentity(m);
-  const atts = (m.attachments || []).filter((a) => !a.inline).map((a) => ({ kind: 'keep', folder: m.folder, uid: m.uid, index: a.index, filename: a.filename, size: a.size, mimeType: a.mimeType }));
+  const acct = m.acct || '';
+  const atts = (m.attachments || []).filter((a) => !a.inline).map((a) => ({ kind: 'keep', acct, folder: m.folder, uid: m.uid, index: a.index, filename: a.filename, size: a.size, mimeType: a.mimeType }));
   const refs = [m.references, m.messageId].filter(Boolean).join(' ').trim();
   const quoted = bodyOf(source.html, { stripBlocked: !source.imagesShown });
 
@@ -114,7 +115,7 @@ export async function composeFromMessage(mode, m) {
       quoteIntro: quoteHeader(m).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
       inReplyTo: m.messageId,
       references: refs,
-      source: { folder: m.folder, uid: m.uid, type: 'reply' },
+      source: { acct, folder: m.folder, uid: m.uid, type: 'reply' },
     });
   }
   if (mode === 'forward') {
@@ -125,13 +126,13 @@ export async function composeFromMessage(mode, m) {
       quoteHtml: `<blockquote type="cite">${forwardHeader(m)}${quoted}</blockquote>`,
       quoteText: m.text || '',
       attachments: atts,
-      source: { folder: m.folder, uid: m.uid, type: 'forward' },
+      source: { acct, folder: m.folder, uid: m.uid, type: 'forward' },
     });
   }
   // draft or edit copy
   return openCompose({
     mode,
-    from: from[0] && identities().some((i) => i.email.toLowerCase() === from[0].email.toLowerCase()) ? from[0] : identity,
+    from: (from[0] && identities().find((i) => i.account === acct && i.email.toLowerCase() === from[0].email.toLowerCase()) && { ...from[0], account: acct }) || identity,
     to: flat(m.to),
     cc: flat(m.cc),
     bcc: flat(m.bcc),
@@ -141,16 +142,26 @@ export async function composeFromMessage(mode, m) {
     format: m.isPlain ? 'text' : 'html',
     attachments: atts,
     draftUid: mode === 'draft' ? m.uid : null,
+    draftAcct: acct,
     inReplyTo: m.inReplyTo,
     references: m.references,
     noSignature: true,
   });
 }
 
+// The address a reply goes out from: one of the receiving account's addresses
+// that the message was sent to, else that account's main address.
 function pickIdentity(m) {
-  const ids = identities();
+  const acct = m.acct || '';
+  const ids = identities().filter((i) => i.account === acct);
   const mine = [...flat(m.to), ...flat(m.cc)].map((a) => a.email.toLowerCase());
-  return ids.find((i) => mine.includes(i.email.toLowerCase())) || ids[0];
+  return ids.find((i) => mine.includes(i.email.toLowerCase())) || ids[0] || defaultIdentity();
+}
+
+/** New mail is sent from the account whose folders are open. */
+function defaultIdentity() {
+  const ids = identities();
+  return ids.find((i) => i.account === state.account) || ids[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -185,10 +196,11 @@ class ComposeWindow {
     this.format = o.format || state.prefs.composeFormat || 'html';
     this.attachments = o.attachments ? [...o.attachments] : [];
     this.draftUid = o.draftUid || null;
+    this.draftAcct = o.draftAcct || '';
     this.dirty = false;
     this.savedAt = 0;
     this.busy = false;
-    this.from = o.from || identities()[0];
+    this.from = o.from || defaultIdentity();
     this.replyToAddr = null;
     this.build();
     this.autosave = setInterval(() => {
@@ -317,6 +329,11 @@ class ComposeWindow {
     return `\n${sig}${quote}`;
   }
 
+  /** The account that sends this message (and keeps its draft). */
+  get account() {
+    return this.from.account || '';
+  }
+
   renderFrom() {
     const f = this.from;
     $('.c-from span', this.el).textContent = f.name ? `${f.name} <${f.email}>` : f.email;
@@ -324,8 +341,18 @@ class ComposeWindow {
 
   fromMenu(anchor) {
     const ids = identities();
+    const grouped = new Set(ids.map((i) => i.account)).size > 1;
+    const items = [];
+    let last = null;
+    for (const i of ids) {
+      if (grouped && i.account !== last) {
+        items.push({ header: accountTitle(i.account) });
+        last = i.account;
+      }
+      items.push({ label: i.name ? `${i.name} <${i.email}>` : i.email, radio: i.email === this.from.email && i.name === this.from.name && i.account === this.account, action: () => { this.from = i; this.renderFrom(); this.markDirty(); } });
+    }
     showMenu(anchor, [
-      ...ids.map((i) => ({ label: i.name ? `${i.name} <${i.email}>` : i.email, radio: i.email === this.from.email && i.name === this.from.name, action: () => { this.from = i; this.renderFrom(); this.markDirty(); } })),
+      ...items,
       '-',
       { label: 'Edit names and addresses…', icon: 'settings', action: () => import('./settings.js').then((s) => s.openSettings('accounts')) },
     ]);
@@ -574,8 +601,10 @@ class ComposeWindow {
       inReplyTo: this.o.inReplyTo || null,
       references: this.o.references || null,
       source: this.o.source || null,
-      draftUid: this.draftUid,
-      keep: this.attachments.filter((a) => a.kind === 'keep').map((a) => ({ folder: a.folder, uid: a.uid, index: a.index })),
+      // A draft kept on another account (the From address changed) is
+      // removed from there after saving, not replaced in place.
+      draftUid: this.draftAcct === this.account ? this.draftUid : null,
+      keep: this.attachments.filter((a) => a.kind === 'keep').map((a) => ({ acct: a.acct || '', folder: a.folder, uid: a.uid, index: a.index })),
     };
     if (this.format === 'text') meta.text = this.editor.value;
     else meta.html = this.editor.innerHTML;
@@ -591,11 +620,14 @@ class ComposeWindow {
     this.renderStatus('Saving…');
     try {
       const { form } = this.collect();
-      const r = await api('draft', { method: 'POST', form });
+      const acct = this.account;
+      const r = await api('draft', { method: 'POST', form, acct });
+      if (this.draftUid && this.draftAcct !== acct) await this.deleteDraft();
       this.draftUid = r.uid;
+      this.draftAcct = acct;
       // Uploaded files now live in the draft; refer to them there.
       this.attachments = r.uid
-        ? r.attachments.map((a) => ({ kind: 'keep', folder: r.folder, uid: r.uid, index: a.index, filename: a.filename, size: a.size, mimeType: a.mimeType }))
+        ? r.attachments.map((a) => ({ kind: 'keep', acct, folder: r.folder, uid: r.uid, index: a.index, filename: a.filename, size: a.size, mimeType: a.mimeType }))
         : this.attachments;
       this.dirty = false;
       this.savedAt = Date.now();
@@ -631,7 +663,10 @@ class ComposeWindow {
     btn.textContent = 'Sending…';
     this.renderStatus('');
     try {
-      const r = await api('send', { method: 'POST', form });
+      const r = await api('send', { method: 'POST', form, acct: this.account });
+      // The old draft was replaced on this account; one left on another
+      // account (From changed) is removed separately.
+      if (this.draftUid && this.draftAcct !== this.account) await this.deleteDraft();
       rememberContacts([...meta.to, ...meta.cc, ...meta.bcc]);
       this.destroy();
       toast('Your email has been sent', { timeout: 3000 });
@@ -676,10 +711,10 @@ class ComposeWindow {
   }
 
   async deleteDraft() {
-    const drafts = folderByUse('drafts');
+    const drafts = folderByUse('drafts', this.draftAcct);
     if (!drafts || !this.draftUid) return;
     try {
-      await api('delete', { method: 'POST', body: { folder: drafts.path, uids: [this.draftUid], permanent: true } });
+      await api('delete', { method: 'POST', body: { folder: drafts.path, uids: [this.draftUid], permanent: true }, acct: this.draftAcct });
     } catch {}
   }
 
