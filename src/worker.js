@@ -9,7 +9,8 @@ import { sendMail, SmtpError } from './smtp.js';
 import { buildMessage } from './mime.js';
 import { sanitizeHtml, textToHtml } from './sanitize.js';
 import { str2bin, b64decode } from './bytes.js';
-import { createSession, loadSession, deleteSession, clearCookie, listSessions, deleteOtherSessions, getPrefs, savePrefs } from './session.js';
+import { createSession, loadSession, deleteSession, clearCookie, listSessions, deleteOtherSessions, getPrefs, savePrefs, userKey } from './session.js';
+import { openVault, listAccounts, saveAccount, deleteAccount, reorderAccounts, loadAccount, cleanAccountInput, detectSettings, PROVIDERS, VaultMissing, AccountLocked } from './accounts.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -94,10 +95,33 @@ function clientIp(request) {
   return request.headers.get('cf-connecting-ip') || null;
 }
 
-async function openImap(env, sess, ip) {
-  const server = findServer(env, sess.server);
-  if (!server) throw new HttpError(401, 'This mail server is no longer configured');
-  return ImapClient.open(server.imap, sess.username, sess.password, ip);
+// A mailbox the request works on: the account the user signed in with
+// (id '') or one of their extra accounts (accounts.js).
+async function resolveAccount(env, sess, id) {
+  if (!id) {
+    const server = findServer(env, sess.server);
+    if (!server) throw new HttpError(401, 'This mail server is no longer configured');
+    return { id: '', primary: true, imap: server.imap, smtp: server.smtp, username: sess.username, password: sess.password, email: primaryEmail(server, sess.username), name: '' };
+  }
+  const acct = await loadAccount(env, sess, id);
+  if (!acct) throw new HttpError(404, 'That mail account no longer exists');
+  return acct;
+}
+
+function primaryEmail(server, username) {
+  return username.includes('@') ? username : `${username}@${server?.domain || 'localhost'}`;
+}
+
+// An extra account whose password stopped working must not end the session.
+class AccountAuthError extends HttpError {}
+
+async function openImap(acct, ip) {
+  try {
+    return await ImapClient.open(acct.imap, acct.username, acct.password, ip);
+  } catch (err) {
+    if (err instanceof AuthError && !acct.primary) throw new AccountAuthError(400, `${acct.email} rejected its saved password. Update it in Settings > Accounts.`);
+    throw err;
+  }
 }
 
 async function folderBySpecialUse(imap, use) {
@@ -121,8 +145,8 @@ function cleanAddrs(list) {
   return (Array.isArray(list) ? list : []).filter(addrOk).map((a) => ({ name: String(a.name || '').replace(/[\r\n]/g, ' ').trim(), email: a.email.trim() }));
 }
 
-function attachmentUrl(folder, uid, q) {
-  return `/api/attachment?folder=${encodeURIComponent(folder)}&uid=${uid}&${q}`;
+function attachmentUrl(acct, folder, uid, q) {
+  return `/api/attachment?${acct ? `acct=${encodeURIComponent(acct)}&` : ''}folder=${encodeURIComponent(folder)}&uid=${uid}&${q}`;
 }
 
 /**
@@ -132,12 +156,15 @@ function attachmentUrl(folder, uid, q) {
  *  - images in the HTML that point at /api/attachment or are data: URIs,
  *    which are turned into inline cid: parts
  */
-async function collectAttachments(imap, meta, uploads, html) {
+async function collectAttachments(imapFor, meta, uploads, html, acctId = '') {
   const attachments = [];
   const parsedCache = new Map();
-  const parsed = async (folder, uid) => {
-    const k = `${folder}\n${uid}`;
+  // Kept parts may come from another account (forwarding from one account
+  // and sending from another), so each one names its account.
+  const parsed = async (folder, uid, acct = acctId) => {
+    const k = `${acct}\n${folder}\n${uid}`;
     if (!parsedCache.has(k)) {
+      const imap = await imapFor(String(acct || ''));
       const r = await imap.fetchRaw(folder, uid);
       parsedCache.set(k, r ? await PostalMime.parse(str2bin(r.raw)) : null);
     }
@@ -145,7 +172,7 @@ async function collectAttachments(imap, meta, uploads, html) {
   };
 
   for (const keep of Array.isArray(meta.keep) ? meta.keep : []) {
-    const p = await parsed(String(keep.folder), +keep.uid);
+    const p = await parsed(String(keep.folder), +keep.uid, keep.acct ?? acctId);
     const att = p?.attachments?.[+keep.index];
     if (!att) continue;
     attachments.push({ filename: att.filename || 'attachment', contentType: att.mimeType, content: new Uint8Array(att.content) });
@@ -164,7 +191,7 @@ async function collectAttachments(imap, meta, uploads, html) {
       let part = null;
       if (src.startsWith('/api/attachment?')) {
         const q = new URLSearchParams(src.split('?')[1]);
-        const p = await parsed(q.get('folder'), +q.get('uid'));
+        const p = await parsed(q.get('folder'), +q.get('uid'), q.get('acct') || '');
         const list = p?.attachments || [];
         const att = q.has('cid') ? list.find((a) => (a.contentId || '').replace(/^<|>$/g, '') === q.get('cid')) : list[+q.get('part')];
         if (att) part = { filename: att.filename || `image${n}`, contentType: att.mimeType, content: new Uint8Array(att.content) };
@@ -220,6 +247,7 @@ const routes = {
       brand: cfg.brand || {},
       servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, domain: s.domain || null, host: s.imap?.host || null })),
       turnstile: turnstileSiteKey(env, cfg),
+      providers: PROVIDERS.map(({ id, name, domains, imap, smtp, help, helpUrl }) => ({ id, name, domains, imap, smtp, help, helpUrl: helpUrl || null })),
     });
   },
 
@@ -241,7 +269,16 @@ const routes = {
       return fail(502, `Could not reach the mail server: ${err.message}`);
     }
     await imap.logout();
+    // Unlock the key for the user's extra accounts with the password that
+    // just worked. If that fails, sign-in still works without them.
+    let vault = null;
+    try {
+      vault = await openVault(env, await userKey(server.id, username), password);
+    } catch (err) {
+      console.error('vault', err);
+    }
     const cookie = await createSession(env, {
+      vault,
       server: server.id,
       username,
       password,
@@ -260,7 +297,63 @@ const routes = {
   'GET /api/session': async ({ env, sess }) => {
     const server = findServer(env, sess.server);
     const email = sess.username.includes('@') ? sess.username : server?.domain ? `${sess.username}@${server.domain}` : sess.username;
-    return json({ username: sess.username, email, server: { id: server?.id, name: server?.name }, prefs: await getPrefs(env, sess.userKey) });
+    const accounts = await listAccounts(env, sess).catch(() => []);
+    return json({ username: sess.username, email, server: { id: server?.id, name: server?.name }, prefs: await getPrefs(env, sess.userKey), accounts, vault: !!sess.vault });
+  },
+
+  // Extra accounts ---------------------------------------------------------
+
+  'GET /api/accounts': async ({ env, sess }) => json({ accounts: await listAccounts(env, sess), vault: !!sess.vault }),
+
+  'GET /api/accounts/detect': async ({ url }) => json({ settings: await detectSettings(url.searchParams.get('email')) }),
+
+  // Adds or updates an account after checking that IMAP and SMTP accept the
+  // login. Body: { id?, email, name, label, provider, username, password, imap, smtp }
+  'POST /api/accounts': async ({ env, sess, request }) => {
+    const body = await request.json();
+    if (!sess.vault) return fail(409, new VaultMissing().message, { accountLocked: true });
+    let data;
+    try {
+      data = cleanAccountInput(body, env);
+    } catch (err) {
+      return fail(400, err.message);
+    }
+    const id = body.id ? String(body.id) : null;
+    let password = String(body.password || '');
+    if (!password && id) {
+      const old = await loadAccount(env, sess, id).catch(() => null);
+      password = old?.password || '';
+    }
+    if (!password) return fail(400, 'Enter the password for this account');
+    const ip = clientIp(request);
+    let c;
+    try {
+      c = await ImapClient.open(data.imap, data.username, password, ip);
+    } catch (err) {
+      if (err instanceof AuthError) return fail(400, `The IMAP server refused the login (${err.message}). Check the username and password; many providers need an app password.`, { field: 'password' });
+      return fail(400, `Could not connect to ${data.imap.host}:${data.imap.port}: ${err.message}`, { field: 'imap' });
+    }
+    await c.logout();
+    try {
+      await sendMail(data.smtp, { username: data.username, password }, null, null, new URL(request.url).hostname, ip);
+    } catch (err) {
+      const auth = err instanceof SmtpError && err.code >= 500 && err.code < 600;
+      return fail(400, `${auth ? 'The SMTP server refused the login' : `Could not connect to ${data.smtp.host}:${data.smtp.port}`}: ${err.message}`, { field: 'smtp' });
+    }
+    const account = await saveAccount(env, sess, { id, data, password });
+    return json({ ok: true, account });
+  },
+
+  'POST /api/accounts/delete': async ({ env, sess, request }) => {
+    const body = await request.json();
+    await deleteAccount(env, sess, String(need(body.id, 'Account missing')));
+    return json({ ok: true });
+  },
+
+  'POST /api/accounts/order': async ({ env, sess, request }) => {
+    const body = await request.json();
+    await reorderAccounts(env, sess, body.ids);
+    return json({ ok: true });
   },
 
   'PUT /api/prefs': async ({ env, sess, request }) => {
@@ -321,7 +414,7 @@ const routes = {
     return json({ folder, total: uids.length, messages });
   },
 
-  'GET /api/message': async ({ imap, url }) => {
+  'GET /api/message': async ({ imap, url, acctId }) => {
     const folder = need(url.searchParams.get('folder'), 'Folder missing');
     const uid = +need(url.searchParams.get('uid'), 'Message missing');
     const allowExternal = url.searchParams.get('images') === '1';
@@ -338,7 +431,7 @@ const routes = {
     const cidUrl = (cid) => {
       if (!cids.has(cid)) return null;
       usedCids.add(cid);
-      return attachmentUrl(folder, uid, `cid=${encodeURIComponent(cid)}`);
+      return attachmentUrl(acctId, folder, uid, `cid=${encodeURIComponent(cid)}`);
     };
     let html;
     let external = false;
@@ -390,7 +483,7 @@ const routes = {
         size: a.content?.byteLength || 0,
         contentId: a.contentId ? a.contentId.replace(/^<|>$/g, '') : null,
         inline: !!(a.contentId && usedCids.has(a.contentId.replace(/^<|>$/g, ''))),
-        url: attachmentUrl(folder, uid, `part=${i}`),
+        url: attachmentUrl(acctId, folder, uid, `part=${i}`),
       })),
     });
   },
@@ -486,12 +579,12 @@ const routes = {
     return json({ ok: true, to: trash.path });
   },
 
-  'POST /api/draft': async ({ imap, request, sess, env }) => {
+  'POST /api/draft': async ({ imap, imapFor, account, request, acctId }) => {
     const { meta, uploads } = await readComposeRequest(request);
     const c = await imap();
-    const identity = defaultIdentity(env, sess);
-    const fields = composeFields(meta, identity);
-    const { attachments, html } = await collectAttachments(c, meta, uploads, meta.html || null);
+    const acct = await account();
+    const fields = composeFields(meta, { name: acct.name || '', email: acct.email });
+    const { attachments, html } = await collectAttachments(imapFor, meta, uploads, meta.html || null, acctId);
     const { raw } = buildMessage({ ...fields, html: meta.isPlain ? null : html, text: meta.isPlain ? meta.text || '' : undefined, attachments }, { includeBcc: true });
     const drafts = await ensureFolder(c, 'drafts', 'Drafts');
     const uid = await c.append(drafts, raw, ['\\Draft', '\\Seen']);
@@ -500,18 +593,17 @@ const routes = {
     return json({ ok: true, folder: drafts, uid, attachments: files.map((a, i) => ({ filename: a.filename, mimeType: a.contentType, size: a.content.length, index: i })) });
   },
 
-  'POST /api/send': async ({ imap, request, sess, env }) => {
+  'POST /api/send': async ({ imap, imapFor, account, request, acctId }) => {
     const { meta, uploads } = await readComposeRequest(request);
-    const identity = defaultIdentity(env, sess);
-    const fields = composeFields(meta, identity);
+    const acct = await account();
+    const fields = composeFields(meta, { name: acct.name || '', email: acct.email });
     const recipients = [...fields.to, ...fields.cc, ...fields.bcc].map((a) => a.email);
     if (!recipients.length) return fail(400, 'Add at least one recipient');
     const c = await imap();
-    const { attachments, html } = await collectAttachments(c, meta, uploads, meta.html || null);
+    const { attachments, html } = await collectAttachments(imapFor, meta, uploads, meta.html || null, acctId);
     const { raw, messageId } = buildMessage({ ...fields, html: meta.isPlain ? null : html, text: meta.isPlain ? meta.text || '' : undefined, attachments });
-    const server = findServer(env, sess.server);
     try {
-      await sendMail(server.smtp, { username: sess.username, password: sess.password }, { from: fields.from.email, recipients: [...new Set(recipients)] }, raw, new URL(request.url).hostname, clientIp(request));
+      await sendMail(acct.smtp, { username: acct.username, password: acct.password }, { from: fields.from.email, recipients: [...new Set(recipients)] }, raw, new URL(request.url).hostname, clientIp(request));
     } catch (err) {
       if (err instanceof SmtpError) return fail(502, `The mail server did not accept the message. ${err.message}`);
       throw err;
@@ -531,18 +623,13 @@ const routes = {
       }
       if (meta.source?.folder && meta.source?.uid) {
         const flag = meta.source.type === 'forward' ? '$Forwarded' : '\\Answered';
-        await c.setFlags(meta.source.folder, [+meta.source.uid], { add: [flag] });
+        const src = await imapFor(String(meta.source.acct || ''));
+        await src.setFlags(meta.source.folder, [+meta.source.uid], { add: [flag] });
       }
     } catch {}
     return json({ ok: true, messageId, warnings });
   },
 };
-
-function defaultIdentity(env, sess) {
-  const server = findServer(env, sess.server);
-  const email = sess.username.includes('@') ? sess.username : `${sess.username}@${server?.domain || 'localhost'}`;
-  return { name: '', email };
-}
 
 // Routes that work without a session.
 const PUBLIC = new Set(['GET /api/config', 'POST /api/login', 'POST /api/logout']);
@@ -560,15 +647,29 @@ async function handleApi(request, env, ctx) {
   const sess = await loadSession(env, request);
   if (!sess && !PUBLIC.has(key)) return fail(401, 'Not signed in', { signedOut: true });
 
-  let client = null;
-  const imap = async () => {
-    if (!client) client = await openImap(env, sess, clientIp(request));
-    return client;
+  // Which mailbox: ?acct=<id> for an extra account, none for the main one.
+  const acctId = url.searchParams.get('acct') || '';
+  const accounts = new Map();
+  const account = (id = acctId) => {
+    if (!accounts.has(id)) accounts.set(id, resolveAccount(env, sess, id));
+    return accounts.get(id);
   };
+  const clients = new Map();
+  const imapFor = (id = acctId) => {
+    if (!clients.has(id)) {
+      const p = account(id).then((a) => openImap(a, clientIp(request)));
+      p.catch(() => clients.delete(id));
+      clients.set(id, p);
+    }
+    return clients.get(id);
+  };
+  const imap = () => imapFor(acctId);
   try {
-    return await handler({ env, request, url, sess, imap });
+    return await handler({ env, request, url, sess, imap, imapFor, account, acctId });
   } catch (err) {
+    if (err instanceof AccountAuthError) return fail(err.status, err.message, { accountAuth: acctId || true });
     if (err instanceof HttpError) return fail(err.status, err.message);
+    if (err instanceof VaultMissing || err instanceof AccountLocked) return fail(409, err.message, { accountLocked: true });
     if (err instanceof AuthError) {
       // The password stopped working (changed on the server): end the session.
       if (sess) await deleteSession(env, sess.idHash);
@@ -578,7 +679,7 @@ async function handleApi(request, env, ctx) {
     console.error(err);
     return fail(500, err.message || 'Something went wrong');
   } finally {
-    if (client) ctx.waitUntil(client.logout());
+    for (const p of clients.values()) ctx.waitUntil(p.then((c) => c.logout(), () => {}));
   }
 }
 

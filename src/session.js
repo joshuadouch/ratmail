@@ -29,6 +29,10 @@ function aad(id, server, username) {
   return enc.encode(`${id}\n${server}\n${username}`);
 }
 
+function vaultAad(id, vaultId) {
+  return enc.encode(`vault\n${id}\n${vaultId}`);
+}
+
 function now() {
   return Math.floor(Date.now() / 1000);
 }
@@ -54,7 +58,7 @@ export function clearCookie(secure) {
 }
 
 /** Creates a session row and returns the Set-Cookie header value. */
-export async function createSession(env, { server, username, password, remember, agent, secure }) {
+export async function createSession(env, { server, username, password, remember, agent, secure, vault }) {
   const id = b64url(crypto.getRandomValues(new Uint8Array(24)));
   const rawKey = crypto.getRandomValues(new Uint8Array(32));
   const key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt']);
@@ -62,11 +66,18 @@ export async function createSession(env, { server, username, password, remember,
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(id, server, username) }, key, enc.encode(password)));
   const t = now();
   const ttl = remember ? REMEMBER_TTL : SESSION_TTL;
-  await env.DB.prepare(
-    `INSERT INTO sessions (id_hash, user_key, server, username, secret, iv, remember, created_at, last_seen, expires_at, agent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(await sha256Hex(id), await userKey(server, username), server, username, bytesToB64(ct), bytesToB64(iv), remember ? 1 : 0, t, t, t + ttl, (agent || '').slice(0, 200))
+  const values = [await sha256Hex(id), await userKey(server, username), server, username, bytesToB64(ct), bytesToB64(iv), remember ? 1 : 0, t, t, t + ttl, (agent || '').slice(0, 200)];
+  let cols = 'id_hash, user_key, server, username, secret, iv, remember, created_at, last_seen, expires_at, agent';
+  if (vault) {
+    // The key for the user's extra accounts (accounts.js), locked with the
+    // same cookie key as the password.
+    const viv = crypto.getRandomValues(new Uint8Array(12));
+    const vct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: viv, additionalData: vaultAad(id, vault.vaultId) }, key, vault.key));
+    cols += ', vault, vault_iv';
+    values.push(`${vault.vaultId}.${bytesToB64(vct)}`, bytesToB64(viv));
+  }
+  await env.DB.prepare(`INSERT INTO sessions (${cols}) VALUES (${values.map(() => '?').join(', ')})`)
+    .bind(...values)
     .run();
   // Tidy up expired sessions now and then.
   if (Math.random() < 0.2) await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(t).run();
@@ -93,19 +104,30 @@ export async function loadSession(env, request) {
   const t = now();
   if (!row || row.expires_at < t) return null;
   let password;
+  let key;
   try {
-    const key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+    key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(row.iv), additionalData: aad(id, row.server, row.username) }, key, b64ToBytes(row.secret));
     password = dec.decode(pt);
   } catch {
     return null;
+  }
+  // Sessions from before extra accounts existed have no vault: those
+  // accounts need a fresh sign-in.
+  let vault = null;
+  if (row.vault && row.vault_iv) {
+    try {
+      const [vaultId, ct] = row.vault.split('.');
+      const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(row.vault_iv), additionalData: vaultAad(id, vaultId) }, key, b64ToBytes(ct));
+      vault = { id: vaultId, key: new Uint8Array(raw) };
+    } catch {}
   }
   // Slide the expiry, at most once every 5 minutes to keep D1 writes low.
   if (t - row.last_seen > 300) {
     const ttl = row.remember ? REMEMBER_TTL : SESSION_TTL;
     await env.DB.prepare('UPDATE sessions SET last_seen = ?, expires_at = ? WHERE id_hash = ?').bind(t, t + ttl, idHash).run();
   }
-  return { idHash, server: row.server, username: row.username, password, userKey: row.user_key, remember: !!row.remember, createdAt: row.created_at };
+  return { idHash, server: row.server, username: row.username, password, userKey: row.user_key, remember: !!row.remember, createdAt: row.created_at, vault };
 }
 
 export async function deleteSession(env, idHash) {

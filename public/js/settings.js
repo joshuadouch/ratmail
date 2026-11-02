@@ -1,8 +1,8 @@
 // Settings: the quick menu under the gear icon and the full settings dialog.
 
-import { api, $, $$, h, esc, showMenu, closeMenu, toast, confirmDialog, fullDate } from './util.js';
+import { api, $, $$, h, esc, showMenu, closeMenu, toast, confirmDialog, fullDate, dialog, isEmail } from './util.js';
 import { icon } from './icons.js';
-import { state, setPrefs, ACCENTS, BACKGROUNDS } from './state.js';
+import { state, setPrefs, ACCENTS, BACKGROUNDS, accountById } from './state.js';
 
 const QUICK_THEMES = [
   ['white', '#ffffff'],
@@ -101,7 +101,8 @@ const PAGES = [
   ['compose', 'Compose', 'edit'],
 ];
 
-export function openSettings(page = 'general') {
+// opts.add opens the "Add mail account" form; opts.edit = account id.
+export function openSettings(page = 'general', opts = {}) {
   $('.modal-back.settings-back')?.remove();
   const back = h(`<div class="modal-back settings-back"><div class="modal settings" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="settings-nav">
@@ -151,13 +152,14 @@ export function openSettings(page = 'general') {
     RENDER[id](body);
   }
   show(page);
+  if (page === 'accounts' && (opts.add || opts.edit)) accountDialog(opts.edit ? accountById(opts.edit) : null, $('.settings-body', back));
 }
 
 const SEARCH_WORDS = {
   general: 'theme accent color background dark layout refresh',
   notifications: 'desktop alert new mail',
   security: 'sessions devices sign out password',
-  accounts: 'name identity alias from address',
+  accounts: 'name identity alias from address add mail account gmail outlook yahoo icloud imap smtp',
   mail: 'images read layout list delete trusted',
   compose: 'signature format plain html font',
 };
@@ -278,6 +280,7 @@ const RENDER = {
       render();
       $$('.identity-row input[data-k="email"]', body).pop()?.focus();
     };
+    renderOtherAccounts(body);
   },
 
   mail(body) {
@@ -325,4 +328,206 @@ function describeAgent(ua = '') {
   const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
   const os = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '';
   return os ? `${browser} on ${os}` : browser;
+}
+
+// ---------------------------------------------------------------------------
+// Other mail accounts (Gmail, Outlook, Yahoo, any IMAP server)
+
+const PROVIDER_ICON_TEXT = { gmail: 'G', outlook: 'O', yahoo: 'Y!', icloud: '', aol: 'Aol', fastmail: 'F', zoho: 'Z', gmx: 'GMX' };
+
+function renderOtherAccounts(body) {
+  $('.s-card.other-accounts', body)?.remove();
+  const list = state.accounts;
+  const noVault = state.session.vault === false;
+  const rows = list
+    .map((a) => `<div class="acct-row" data-id="${esc(a.id)}">
+      <span class="acct-badge">${icon('mail')}</span>
+      <div class="acct-info"><b>${esc(a.label || a.email)}</b><span class="muted">${esc(a.label ? a.email : '')}${a.label ? ' · ' : ''}${esc(a.imap.host)}</span>
+        ${a.locked ? `<span class="acct-warn">${icon('alert')} Needs its password again</span>` : ''}</div>
+      <button class="btn small" data-edit>${a.locked ? 'Enter password' : 'Edit'}</button>
+      <button class="icon-btn" data-remove title="Remove account">${icon('trash')}</button>
+    </div>`)
+    .join('');
+  const node = h(card('Other mail accounts', 'Add Gmail, Outlook, Yahoo, iCloud or any other IMAP mailbox. They appear in the folder list on the left, and you can send from them.', `
+    ${noVault ? '<p class="acct-warn" style="margin:0 0 12px">Sign out and sign in again to add or use other accounts on this device.</p>' : ''}
+    <div class="acct-list">${rows || '<p class="muted" style="margin:0 0 12px">No other accounts yet.</p>'}</div>
+    <button class="btn" data-add-acct ${noVault ? 'disabled' : ''}>${icon('plus')} Add mail account</button>
+    <p class="muted" style="margin:14px 0 0;font-size:12px">Passwords are stored encrypted. They can only be unlocked with your ${esc(state.session.server?.name || 'mail')} password or a signed-in browser.</p>`));
+  node.classList.add('other-accounts');
+  body.append(node);
+  node.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-add-acct]')) return accountDialog(null, body);
+    const row = e.target.closest('[data-id]');
+    if (!row) return;
+    const a = accountById(row.dataset.id);
+    if (e.target.closest('[data-edit]')) return accountDialog(a, body);
+    if (e.target.closest('[data-remove]')) {
+      if (!(await confirmDialog('Remove account', `Remove ${a.email} from ratmail? Nothing is deleted from the mailbox itself.`, { ok: 'Remove', danger: true }))) return;
+      try {
+        await api('accounts/delete', { method: 'POST', body: { id: a.id }, acct: '' });
+        await accountsUpdated(body);
+        toast(`${a.email} was removed`);
+      } catch (err) {
+        toast(err.message, { type: 'error' });
+      }
+    }
+  });
+}
+
+async function accountsUpdated(body) {
+  const { accounts } = await api('accounts', { acct: '' });
+  state.accounts = accounts;
+  if (body?.isConnected) renderOtherAccounts(body);
+  const { appApi } = await import('./main.js');
+  await appApi.accountsChanged(accounts);
+}
+
+function serverFields(kind, s) {
+  const ports = kind === 'imap' ? [993, 143] : [465, 587];
+  return `<div class="acct-server">
+    <label class="field"><span>${kind.toUpperCase()} server</span><input class="input" data-f="${kind}.host" value="${esc(s?.host || '')}" placeholder="${kind}.example.com" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Port</span><input class="input" data-f="${kind}.port" type="number" value="${esc(s?.port || ports[0])}" list="${kind}-ports"></label>
+    <label class="field"><span>Security</span><select class="input" data-f="${kind}.tls"><option value="on" ${s?.tls === 'on' || !s?.tls ? 'selected' : ''}>SSL/TLS</option><option value="starttls" ${s?.tls === 'starttls' ? 'selected' : ''}>STARTTLS</option>${s?.tls === 'off' ? '<option value="off" selected>None (local testing)</option>' : ''}</select></label>
+    <datalist id="${kind}-ports">${ports.map((p) => `<option value="${p}">`).join('')}</datalist>
+  </div>`;
+}
+
+/** Add (a = null) or edit an extra account. */
+function accountDialog(a, settingsBody) {
+  if (state.session.vault === false) return toast('Sign out and sign in again to add other accounts', { type: 'error' });
+  const providers = state.config.providers || [];
+  let provider = a?.provider || 'other';
+  let detected = !!a;
+  const form = h(`<div class="acct-form">
+    ${a ? '' : `<div class="provider-grid">${providers.map((p) => `<button type="button" class="provider" data-provider="${p.id}"><span class="p-logo p-${p.id}">${esc(PROVIDER_ICON_TEXT[p.id] ?? p.name[0])}</span><span>${esc(p.name)}</span></button>`).join('')}<button type="button" class="provider" data-provider="other"><span class="p-logo">${icon('mail')}</span><span>Other (IMAP)</span></button></div>`}
+    <label class="field"><span>Email address</span><input class="input" data-f="email" type="email" value="${esc(a?.email || '')}" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Password</span><input class="input" data-f="password" type="password" autocomplete="new-password" placeholder="${a && !a.locked ? 'Leave empty to keep the saved password' : ''}"></label>
+    <p class="acct-help muted"></p>
+    <label class="field"><span>Your name</span><input class="input" data-f="name" value="${esc(a?.name ?? state.prefs.displayName ?? '')}" placeholder="Shown as the sender name"></label>
+    <label class="field"><span>Name in the folder list (optional)</span><input class="input" data-f="label" value="${esc(a?.label || '')}" placeholder="For example: Personal Gmail"></label>
+    <details class="acct-adv" ${a && a.provider === 'other' ? 'open' : ''}><summary>Server settings</summary>
+      <label class="field"><span>Username</span><input class="input" data-f="username" value="${esc(a?.username || '')}" placeholder="Usually your email address" autocomplete="off" spellcheck="false"></label>
+      ${serverFields('imap', a?.imap)}
+      ${serverFields('smtp', a?.smtp)}
+    </details>
+    <p class="acct-error hidden"></p>
+  </div>`);
+  const f = (k) => $(`[data-f="${k}"]`, form);
+  const setServers = (imap, smtp) => {
+    for (const [kind, s] of [['imap', imap], ['smtp', smtp]]) {
+      if (!s) continue;
+      f(`${kind}.host`).value = s.host;
+      f(`${kind}.port`).value = s.port;
+      f(`${kind}.tls`).value = s.tls;
+    }
+  };
+  const showHelp = () => {
+    const p = providers.find((x) => x.id === provider);
+    const help = $('.acct-help', form);
+    help.innerHTML = p?.help ? `${esc(p.help)}${p.helpUrl ? ` <a href="${esc(p.helpUrl)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}` : '';
+    help.classList.toggle('hidden', !p?.help);
+    $$('.provider', form).forEach((b) => b.classList.toggle('on', b.dataset.provider === provider));
+  };
+  const pickProvider = (id) => {
+    provider = id;
+    const p = providers.find((x) => x.id === id);
+    if (p) {
+      setServers(p.imap, p.smtp);
+      detected = true;
+    }
+    $('.acct-adv', form).open = id === 'other';
+    showHelp();
+    f('email').focus();
+  };
+  showHelp();
+  form.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-provider]');
+    if (b) pickProvider(b.dataset.provider);
+  });
+  // Fill in server settings from the address (presets, then Thunderbird's
+  // settings database and the domain's autoconfig file).
+  f('email').addEventListener('change', async () => {
+    const email = f('email').value.trim();
+    if (!isEmail(email) || a) return;
+    const domain = email.split('@')[1].toLowerCase();
+    const p = providers.find((x) => (x.domains || []).includes(domain));
+    try {
+      const { settings } = await api('accounts/detect', { query: { email }, acct: '' });
+      if (!settings) {
+        if (provider === 'other' && !f('imap.host').value) $('.acct-adv', form).open = true;
+        return;
+      }
+      if (settings.provider !== 'other') provider = settings.provider;
+      else if (!p && !detected) provider = 'other';
+      setServers(settings.imap, settings.smtp);
+      if (!f('username').value || f('username').dataset.auto) {
+        f('username').value = settings.username || email;
+        f('username').dataset.auto = '1';
+      }
+      detected = true;
+      showHelp();
+    } catch {}
+  });
+  f('username').addEventListener('input', () => delete f('username').dataset.auto);
+
+  const save = async (back) => {
+    const err = $('.acct-error', form);
+    const btn = $('.btn-primary', back);
+    const payload = {
+      id: a?.id,
+      provider,
+      email: f('email').value.trim(),
+      password: f('password').value,
+      name: f('name').value.trim(),
+      label: f('label').value.trim(),
+      username: f('username').value.trim() || f('email').value.trim(),
+      imap: { host: f('imap.host').value.trim(), port: +f('imap.port').value, tls: f('imap.tls').value },
+      smtp: { host: f('smtp.host').value.trim(), port: +f('smtp.port').value, tls: f('smtp.tls').value },
+    };
+    err.classList.add('hidden');
+    if (!isEmail(payload.email)) return showError('Enter the email address');
+    if (!payload.password && (!a || a.locked)) return showError('Enter the password');
+    if (!payload.imap.host || !payload.smtp.host) {
+      $('.acct-adv', form).open = true;
+      return showError('Enter the IMAP and SMTP server names (under Server settings)');
+    }
+    btn.disabled = true;
+    btn.textContent = 'Checking …';
+    try {
+      const r = await api('accounts', { method: 'POST', body: payload, acct: '' });
+      back.dispatchEvent(new CustomEvent('saved', { detail: r.account }));
+    } catch (e2) {
+      if (e2.data?.field === 'imap' || e2.data?.field === 'smtp') $('.acct-adv', form).open = true;
+      showError(e2.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = a ? 'Save' : 'Add account';
+    }
+    function showError(text) {
+      err.textContent = text;
+      err.classList.remove('hidden');
+    }
+  };
+
+  let saved = null;
+  return dialog({
+    title: a ? `Edit ${a.email}` : 'Add mail account',
+    body: form,
+    wide: true,
+    className: 'acct-dialog',
+    onMount: (back) => {
+      back.addEventListener('saved', (e) => {
+        saved = e.detail;
+        $('.modal-foot .btn:not(.btn-primary)', back).click();
+      });
+    },
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: a ? 'Save' : 'Add account', primary: true, value: (back) => { save(back); return undefined; } },
+    ],
+  }).then(async () => {
+    if (!saved) return;
+    toast(a ? 'Account saved' : `${saved.email} was added`);
+    await accountsUpdated(settingsBody);
+  });
 }
